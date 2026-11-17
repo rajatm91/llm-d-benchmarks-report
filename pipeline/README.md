@@ -8,7 +8,7 @@ It wraps the upstream [llm-d/llm-d](https://github.com/llm-d/llm-d) `guides/` (p
 
 ```bash
 ./deploy.sh profiles/pd-tiered-cpu-agentgateway.yaml --dry-run   # render only, output in .build/<name>/
-HF_TOKEN=hf_xxx ./deploy.sh profiles/pd-tiered-cpu-agentgateway.yaml   # deploy, wait, smoke test
+./deploy.sh profiles/pd-tiered-cpu-agentgateway.yaml             # deploy, wait, smoke test
 ./deploy.sh profiles/pd-tiered-cpu-agentgateway.yaml --delete
 ./test.sh                                                       # offline render checks for all profiles
 ```
@@ -44,40 +44,42 @@ The router chart always creates its own EPP ServiceAccount (`NAME-epp`) and RBAC
 On a machine **with** internet access:
 ```bash
 IMAGE_REGISTRY=us-docker.pkg.dev/<proj>/llm-d \
-MODEL_BUCKET=gs://<bucket> \
 ./bundle.sh                      # or: ./bundle.sh profiles/a.yaml profiles/b.yaml
 ```
 1. **Renders every profile.** This fills `.cache/` (the pinned llm-d guides, the router chart under `.cache/charts/`, the InferencePool CRDs under `.cache/crds/`) and `.build/`.
 2. **Locks image digests.** Every image the renders use, plus the smoke-test image, is resolved to a digest in `.cache/images.lock`. Moving tags like `:main`, `:nightly` and `:latest` are frozen there.
 3. **Mirrors images** to `IMAGE_REGISTRY/<source host>/<path>` with crane, gcrane, skopeo or `docker buildx imagetools`. The copy is multi-arch and digest-preserving.
-4. **Uploads weights** of every profile's `model` and `draftModel` to `MODEL_BUCKET/<org>/<name>/`, skipping models already uploaded. Needs `hf` and `gcloud`.
-5. **Packs** this directory, including `.cache/`, into `dist/llm-d-bundle-<llmd sha>-<date>.tar.gz` (about 8 MB, since the weights live in GCS).
+4. **Packs** this directory, including `.cache/`, into `dist/llm-d-bundle-<llmd sha>-<date>.tar.gz` (about 8 MB).
 
-Without `IMAGE_REGISTRY`, step 3 is skipped (mirror with your own tooling, using the paths above). Without `MODEL_BUCKET`, step 4 is skipped.
+Without `IMAGE_REGISTRY`, step 3 is skipped (mirror with your own tooling, using the paths above). Model weights are not part of the bundle; see [0b](#0b-model-weights-from-gcs).
 
 Inside the air gap, unpack the tarball and deploy as usual:
 ```bash
-export IMAGE_REGISTRY=us-docker.pkg.dev/<proj>/llm-d MODEL_BUCKET=gs://<bucket>
+export IMAGE_REGISTRY=us-docker.pkg.dev/<proj>/llm-d
 ./deploy.sh profiles/<name>.yaml
 ```
 `deploy.sh` needs no network. It reads the guides and chart from `.cache/` and rewrites every image to `$IMAGE_REGISTRY/...@sha256:<digest>`. An image that is not in `images.lock` fails the render. A new profile or an `llmdRef` bump means re-running `bundle.sh` (with just the new profiles is fine; the lock is merged). `./test.sh` checks the air-gapped rewrite for every profile whenever `images.lock` exists.
 
 The router is applied from the rendered manifest (`kubectl apply --server-side`), like the model servers. The chart has no hooks or lookups, so this is what `helm install` would create, and it is exactly the manifest that `--dry-run` and Jenkins archive. All router objects carry `llm-d.ai/deployment=<name>`. Removing resources that disappeared between chart versions is not automatic: run `--delete` with the old render first.
 
-## 0b. Model weights from GCS (air-gapped)
+## 0b. Model weights from GCS
 
-Set `MODEL_BUCKET=gs://<bucket>` (env or Jenkins). Every model is then read from `gs://<bucket>/<org>/<name>/`, a plain copy of the HF repo files. Use `MODEL_GCS_URI` to override the path for one profile. No Hugging Face access and no `HF_TOKEN` are needed.
+Weights are **never downloaded or uploaded by this repo**. The garuda repo downloads them and stores them in GCS, and this pipeline assumes they are already there, one folder per model:
+
+```
+gs://models_registry/<folder>/          # the model repo files at the top: config.json, *.safetensors, tokenizer...
+<folder> = HF id, lowercased, "/" -> "__", every other non-alphanumeric -> "_"
+  google/gemma-4-31B-it  -> gs://models_registry/google__gemma_4_31b_it
+  Qwen/Qwen3.8-27B       -> gs://models_registry/qwen__qwen3_8_27b
+  zai-org/GLM-5.2-FP8    -> gs://models_registry/zai_org__glm_5_2_fp8
+```
+`MODEL_BUCKET` (default `gs://models_registry`) changes the bucket. `weights.gcsUri` / `weights.draftGcsUri` in a profile override the full path for one model. No Hugging Face access and no token are needed.
 
 How it works: `deploy.sh` adds a `fetch-model` init container to every pod that runs `vllm serve`.
 - **Download:** it runs `gcloud storage rsync` from the bucket to a node-local hostPath (`MODEL_CACHE_PATH`, default GKE local SSD `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models`).
 - **Layout:** the files go in as a Hugging Face cache entry (`hub/models--<org>--<name>/snapshots/<sha1(gs path)>`). vLLM gets `HF_HOME=/model-cache` and `HF_HUB_OFFLINE=1`, so the overlays keep passing the HF model ID unchanged and the served model name does not change.
 - **One download per node:** a `flock` plus a completion marker means pods and ranks on the same node wait for a single download, and a restart skips it. Wide-EP downloads once on each node, in parallel.
-
-Populate the bucket from a connected machine:
-```bash
-hf download Qwen/Qwen3-32B --local-dir /tmp/m/Qwen/Qwen3-32B --exclude ".cache/*"
-gcloud storage rsync --recursive /tmp/m/Qwen/Qwen3-32B gs://<bucket>/Qwen/Qwen3-32B
-```
+- **Sanity check:** if the folder has no `config.json` at its top, `fetch-model` fails with a clear error and writes no marker, so the next start retries.
 
 Prerequisites:
 - **Bucket access:** the pre-existing `SERVICE_ACCOUNT` needs `roles/storage.objectViewer` on the bucket, granted through Workload Identity.
@@ -85,7 +87,7 @@ Prerequisites:
 - **Image:** mirror `DOWNLOADER_IMAGE` to Artifact Registry and pin it.
 - **Disk:** local SSD per node must be at least the model size. Cached models are never evicted, so clean old ones up yourself.
 
-**Updating weights:** upload them to a **new path** (for example `.../Qwen3-32B@2026-11-17`) and point `MODEL_GCS_URI` at it. The node marker is keyed by path, so re-uploading to the same path is not picked up by nodes that already hold that path.
+**Updating weights:** have garuda write them to a **new folder** and point `weights.gcsUri` at it. The node marker is keyed by path, so new files under the same path are not picked up by nodes that already hold that path.
 
 ## 0c. Speculative decoding with a draft model
 
@@ -94,7 +96,7 @@ draftModel: Qwen/Qwen3-0.6B          # HF id of the draft (or an EAGLE head); om
 speculativeConfig:                   # optional, default {num_speculative_tokens: 5}; "model" is filled from draftModel
   num_speculative_tokens: 5          # e.g. method: eagle3, draft_tensor_parallel_size: 1
 ```
-- **Weights:** with `MODEL_BUCKET` set, the draft comes from the same bucket (`gs://<bucket>/<org>/<draft>/`, override with `DRAFT_GCS_URI`). The same `fetch-model` step downloads both models into the node cache. Without a bucket, vLLM pulls the draft from Hugging Face.
+- **Weights:** the draft comes from the same bucket and naming (`Qwen/Qwen3-0.6B` → `gs://models_registry/qwen__qwen3_0_6b`, override with `weights.draftGcsUri`). The same `fetch-model` step downloads both models into the node cache.
 - **Flag placement:** `--speculative-config` is added to every vLLM container. In list-form overlays it is appended to `args`. In script-form overlays (`bash -c "exec vllm serve ..."`) it is inserted right after the model, because vLLM expects `vllm serve <model> --flags`. The render fails if any vLLM container ends up without the flag.
 - **MTP overlays:** overlays that already configure speculative decoding (for example GLM-5.2's MTP) are rejected when `DRAFT_MODEL` is set.
 - **P/D and wide-EP:** a draft model is not covered by the upstream guides on these paths, so the render prints a warning. Validate before production.
@@ -115,6 +117,7 @@ modelserver:
 ```
 - **Model id:** the overlay's reference id (found through its `llm-d.ai/model` label) is replaced in every vLLM command (list args or bash script, including the KV-events topic) and in the `llm-d.ai/model` labels and selector.
 - **Old model's flags:** its model-specific flags (`--tool-call-parser`, `--reasoning-parser`, `--chat-template`, `--enable-auto-tool-choice`) are dropped. Put the new model's flags in `args`. They are inserted right after the model id, or appended for list-form overlays, and shell-quoted, so JSON values are safe.
+- **vLLM image:** `modelserver.image` swaps the image of every container that runs `vllm serve`; sidecars, `fetch-model` and helper containers keep theirs. It must name a tag or digest. `bundle.sh` picks it up like any other image (lock + mirror), and with `IMAGE_REGISTRY` it is pinned by digest.
 - **Sizing:** `tensorParallel` rewrites the TP flag and the GPU limits and requests, and `replicas` sets the Deployment replicas. Both work on aggregated overlays (baseline, tiered) only. P/D and wide-EP size each role differently, so use `modelserver.patches` or an upstream `guides/models/*` recipe there.
 - **Check first:** confirm the overlay's vLLM image supports the architecture (v0.31.0 supports Gemma 4 and Qwen3.5/3.8) and take flags from the model's vLLM recipe (`recipes.vllm.ai/<org>/<model>`). The render cannot check that the model fits in GPU memory.
 
@@ -211,7 +214,7 @@ Re-tune these whenever you combine paths:
 
 Profile schema (YAML). Unknown keys fail the render, so a typo can't silently fall back to a default:
 ```yaml
-model: Qwen/Qwen3-32B                # required: HF id (also the GCS path under MODEL_BUCKET)
+model: Qwen/Qwen3-32B                # required: HF id (also gives the GCS folder: qwen__qwen3_32b)
 strategy: baseline-specdec           # required: the {strategy} part of the name
 modelAlias: qwen3-32b                # optional: short {model} part when the name exceeds 40 chars
 engine: vllm                         # optional: inferred from modelserver.overlay
@@ -225,16 +228,17 @@ modelserver:
   tensorParallel: 2                  # aggregated overlays only: --tensor-parallel-size + GPU count
   replicas: 2                        # aggregated overlays only
   args: [--enable-auto-tool-choice, --tool-call-parser=qwen3_coder]   # the model's own vLLM flags
+  image: docker.io/vllm/vllm-openai:v0.32.0   # replaces the overlay's vLLM image (vLLM containers only)
 router:
   values: [guides/optimized-baseline/router/optimized-baseline.values.yaml]   # layered in order, last wins
   set: []                            # extra helm --set
   mode: gateway                      # gateway | standalone
   chartVersion: v0
 gateway: {provider: agentgateway, name: llm-d-inference-gateway, namespace: agentgateway-system, baseModel: ""}
-weights: {gcsUri: "", draftGcsUri: ""}   # override $MODEL_BUCKET/<model> per model
+weights: {gcsUri: "", draftGcsUri: ""}   # override $MODEL_BUCKET/<folder> per model
 llmdRef: 565373b741e90bffa27930b4669c6e1f222f6225
 waitTimeout: 60m
 ```
-Environment-wide settings come from env vars or Jenkins, not from profiles: `NAMESPACE`, `SERVICE_ACCOUNT`, `MODEL_BUCKET`, `MODEL_CACHE_PATH`, `DOWNLOADER_IMAGE`, `HF_TOKEN`. `./deploy.sh <profile> --env` prints the resolved settings. Paths that start with `guides/` resolve inside the pinned llm-d checkout. Any other path resolves relative to this directory.
+Environment-wide settings come from env vars or Jenkins, not from profiles: `NAMESPACE`, `SERVICE_ACCOUNT`, `MODEL_BUCKET`, `MODEL_CACHE_PATH`, `DOWNLOADER_IMAGE`, `IMAGE_REGISTRY`. `./deploy.sh <profile> --env` prints the resolved settings. Paths that start with `guides/` resolve inside the pinned llm-d checkout. Any other path resolves relative to this directory.
 
 **Changing the model** means changing the engine args, the GPU counts and the router sizing. Upstream hard-codes all of them per overlay, so add a `PATCHES` file instead of expecting a single `MODEL` variable to rewrite them. `MODEL` is used only for the smoke test.

@@ -28,7 +28,7 @@ client ──► Gateway  (agentgateway / GKE L7, shared, pre-existing)         
                        │                  ─┘
                        └─ selects pods llm-d.ai/deployment=<name>
                             └─ vLLM pods  ─── model-server half: rendered from an llm-d guide overlay
-                                 ├─ init: fetch-model  (gs://<bucket>/<org>/<model> → node-local SSD)
+                                 ├─ init: fetch-model  (gs://models_registry/<org>__<model> → node-local SSD)
                                  └─ vllm serve <model> ...                  ns: llm-d (shared by all models)
 ```
 
@@ -146,7 +146,7 @@ metadata:
 PROJECT_ID=<project>; PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format='value(projectNumber)')
 
 # model servers read weights from GCS (Workload Identity, no keys)
-gcloud storage buckets add-iam-policy-binding gs://<bucket> --role=roles/storage.objectViewer \
+gcloud storage buckets add-iam-policy-binding gs://models_registry --role=roles/storage.objectViewer \
   --member="principal://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/${PROJECT_ID}.svc.id.goog/subject/ns/llm-d/sa/llm-d-modelserver"
 
 # nodes pull images from the private Artifact Registry
@@ -174,12 +174,11 @@ For agentgateway or Istio, set `provider.name` accordingly. The mappings are cre
 
 ## 2. Prepare artifacts (connected machine)
 
-Run this once per llm-d version, and again whenever a profile adds a new model or image:
+Run this once per llm-d version, and again whenever a profile needs a new image:
 
 ```bash
 cd pipeline
 IMAGE_REGISTRY=us-docker.pkg.dev/<project>/llm-d \
-MODEL_BUCKET=gs://<bucket> \
 ./bundle.sh                                  # or only some: ./bundle.sh profiles/qwen3.8-27b-baseline-agentgateway.yaml
 ```
 
@@ -190,14 +189,20 @@ MODEL_BUCKET=gs://<bucket> \
 | `.cache/crds/` | InferencePool CRDs ([1.2](#12-gateway-api-and-inferencepool-crds)) |
 | `.cache/images.lock` | every image, pinned to a digest |
 | images in `IMAGE_REGISTRY/<host>/<path>` | the cluster pulls from here |
-| `gs://<bucket>/<org>/<model>/` | the weights of every profile's `model` and `draftModel` |
-| `dist/llm-d-bundle-<sha>-<date>.tar.gz` | everything above except images and weights; carry it into the air gap |
+| `dist/llm-d-bundle-<sha>-<date>.tar.gz` | everything above except images; carry it into the air gap |
 
-`bundle.sh` uploads the weights itself (it needs `hf` and `gcloud`). To upload by hand instead, keep this layout: the plain Hugging Face repo files at `<org>/<name>/`.
+**Model weights are not part of this step.** The garuda repo downloads them and stores them in GCS. This pipeline only reads them, from one folder per model:
+
+```
+gs://models_registry/<folder>/     model repo files at the top (config.json, *.safetensors, tokenizer, ...)
+<folder> = HF id lowercased, "/" -> "__", every other non-alphanumeric -> "_"
+  google/gemma-4-31B-it -> google__gemma_4_31b_it       Qwen/Qwen3.8-27B -> qwen__qwen3_8_27b
+```
+
+Before deploying a model, check that garuda has stored it:
 
 ```bash
-hf download Qwen/Qwen3.8-27B --local-dir /tmp/m/Qwen/Qwen3.8-27B --exclude ".cache/*"
-gcloud storage rsync --recursive /tmp/m/Qwen/Qwen3.8-27B gs://<bucket>/Qwen/Qwen3.8-27B
+gcloud storage ls gs://models_registry/qwen__qwen3_8_27b/config.json
 ```
 
 Inside the air gap, unpack the tarball. The machine that runs `deploy.sh` (a Jenkins agent or a workstation) needs `kubectl` (≥ 1.27, with kustomize v5), `helm` ≥ 3.8, `yq` v4, `git` and `python3`. It doesn't need internet access.
@@ -227,7 +232,7 @@ Rules worth knowing:
 
 ```yaml
 # profile: profiles/gemma-4-31b-baseline-agentgateway.yaml
-model: google/gemma-4-31B-it              # HF id; weights at gs://<bucket>/google/gemma-4-31B-it/
+model: google/gemma-4-31B-it              # HF id; weights at gs://models_registry/google__gemma_4_31b_it/
 strategy: baseline                        # → name gemma-4-31b-it-baseline-vllm
 modelserver:
   overlay: guides/optimized-baseline/modelserver/gpu/vllm/base
@@ -277,7 +282,7 @@ gateway:
 # profile: profiles/baseline-specdec-agentgateway.yaml
 model: Qwen/Qwen3-32B
 strategy: baseline-specdec                # different strategy → different name from plain baseline
-draftModel: Qwen/Qwen3-0.6B               # same tokenizer; fetched from gs://<bucket>/Qwen/Qwen3-0.6B/
+draftModel: Qwen/Qwen3-0.6B               # same tokenizer; fetched from gs://models_registry/qwen__qwen3_0_6b/
 speculativeConfig:                        # optional; "model" is filled in from draftModel
   num_speculative_tokens: 5
 modelserver:
@@ -411,6 +416,35 @@ data:
 
 If routes already exist on the Gateway and `baseModel` is not set, `deploy.sh` stops.
 
+### Sample J: newer vLLM image, one GPU per node (5 × g4-standard-48)
+
+A `g4-standard-48` has **one** NVIDIA RTX PRO 6000 (96 GB). Gemma 4 31B in BF16 (about 62.5 GB) fits on it, so run one whole-GPU replica per node. TP across nodes would go over the network.
+
+```yaml
+# profile: profiles/gemma-4-31b-g4-agentgateway.yaml
+model: google/gemma-4-31B-it              # gs://models_registry/google__gemma_4_31b_it
+strategy: g4                              # → name gemma-4-31b-it-g4-vllm
+modelserver:
+  overlay: guides/optimized-baseline/modelserver/gpu/vllm/base
+  image: docker.io/vllm/vllm-openai:v0.32.0   # newer vLLM than the overlay's v0.31.0 (vLLM containers only)
+  tensorParallel: 1                       # whole model on the one GPU
+  replicas: 5                             # = nodes × GPUs per node (5 × 1)
+  args:
+    - --max-model-len=32768               # ~24 GB left for KV cache after BF16 weights; check the startup log
+    # - --quantization=fp8                # optional: weights ~31 GB → ~55 GB for KV cache
+router:
+  values:
+    - guides/optimized-baseline/router/optimized-baseline.values.yaml
+gateway:
+  provider: agentgateway
+  name: llm-d-inference-gateway
+  namespace: agentgateway-system
+```
+
+- **Replica count:** `replicas` = nodes × GPUs per node ÷ `tensorParallel`. Each pod requests the node's only GPU, so the scheduler puts exactly one on each node.
+- **Node pool:** to keep the pods on the G4 pool, add a `nodeSelector` (`cloud.google.com/gke-nodepool: <pool>`) and a `nvidia.com/gpu` toleration through `modelserver.patches`, as in sample I.
+- **New image:** with a new `image`, re-run `./bundle.sh` for this profile so the image is locked and mirrored. Otherwise the air-gapped render stops with "image ... is not in .cache/images.lock".
+
 ### Sample I: changing what an overlay hard-codes (patch)
 
 For anything without a profile field, such as memory or GPU count per P/D role, add a kustomize patch:
@@ -447,7 +481,7 @@ None of these steps need a cluster:
 cd pipeline
 ./deploy.sh profiles/qwen3.8-27b-baseline-agentgateway.yaml --name     # qwen3-8-27b-baseline-vllm
 ./deploy.sh profiles/qwen3.8-27b-baseline-agentgateway.yaml --env      # every resolved setting
-IMAGE_REGISTRY=us-docker.pkg.dev/<project>/llm-d MODEL_BUCKET=gs://<bucket> \
+IMAGE_REGISTRY=us-docker.pkg.dev/<project>/llm-d \
   ./deploy.sh profiles/qwen3.8-27b-baseline-agentgateway.yaml --dry-run
 less .build/qwen3-8-27b-baseline-vllm/{modelserver,router}.yaml        # exactly what will be applied
 ./test.sh                                                               # all profiles, ~10 s
@@ -469,7 +503,7 @@ less .build/qwen3-8-27b-baseline-vllm/{modelserver,router}.yaml        # exactly
 cd pipeline
 export NAMESPACE=llm-d                                   # defaults shown
 export SERVICE_ACCOUNT=llm-d-modelserver
-export MODEL_BUCKET=gs://<bucket>                        # unset = download from Hugging Face (needs HF_TOKEN)
+export MODEL_BUCKET=gs://models_registry               # where garuda stores the weights
 export IMAGE_REGISTRY=us-docker.pkg.dev/<project>/llm-d  # unset = public registries
 ./deploy.sh profiles/qwen3.8-27b-baseline-agentgateway.yaml
 ```
@@ -509,9 +543,10 @@ Clients always send the **Hugging Face model id**, even though the weights come 
 | Task | How |
 | --- | --- |
 | Change flags, replicas or TP | Edit the profile, then `./deploy.sh <profile>` (`--dry-run` first). |
-| New weights for the same model | Upload them to a **new path** (`gs://<bucket>/Qwen/Qwen3.8-27B@2026-12-01`), set `weights.gcsUri` to it, and redeploy. Nodes cache by path, so the same path is not re-downloaded. |
-| Add a model | Write a profile, run `./bundle.sh profiles/<new>.yaml` on the connected side (images and weights), then deploy. |
+| New weights for the same model | Have garuda store them in a **new folder**, set `weights.gcsUri` to it, and redeploy. Nodes cache by path, so new files under the same path are not re-downloaded. |
+| Add a model | Make sure garuda has stored it in `gs://models_registry/<folder>/`, write a profile, run `./bundle.sh profiles/<new>.yaml` on the connected side if it needs new images, then deploy. |
 | Remove a deployment | `./deploy.sh <profile> --delete`. This removes exactly the rendered model-server and router objects. The ServiceAccount, namespace and Gateway stay. |
+| Upgrade vLLM for one model | Set `modelserver.image` (tag or digest), run `./bundle.sh profiles/<it>.yaml` on the connected side, then deploy. Only that model's vLLM containers change. |
 | Upgrade llm-d | Change `llmdRef` (or `LLMD_REF`), run `./test.sh`, and re-run `./bundle.sh`. If upstream moved or reordered something, the render fails before anything reaches a cluster. |
 | Free node disk | Delete old model folders under `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models/hub/` on the node. The cache is never evicted automatically. |
 
@@ -535,7 +570,7 @@ pipeline {
   environment {
     NAMESPACE      = 'llm-d'
     IMAGE_REGISTRY = 'us-docker.pkg.dev/<project>/llm-d'
-    MODEL_BUCKET   = 'gs://<bucket>'
+    MODEL_BUCKET   = 'gs://models_registry'
   }
   options { timeout(time: 3, unit: 'HOURS') }
   stages {
@@ -578,6 +613,7 @@ pipeline {
 | `HTTPRoute ... not accepted` / deploy waits at the route | The Gateway listener doesn't allow routes from `llm-d`. Set `allowedRoutes.namespaces.from: All` (or a matching Selector). |
 | `Gateway already has routes ...; set BASE_MODEL` | Another model already owns `/`. Set `gateway.baseModel` in every profile, and install IPP ([1.6](#16-several-models-on-one-gateway-inference-payload-processor)). |
 | Pod stuck in `Init:0/1`, the `fetch-model` log shows 403 | The ServiceAccount can't read the bucket. Check the Workload Identity binding ([1.5](#15-shared-namespace-serviceaccount-and-access-to-the-weights-bucket)) and Private Google Access. |
+| `fetch-model`: `no config.json at the top of gs://...` | The folder name or layout doesn't match. Check `gcloud storage ls gs://models_registry/<folder>/`; if garuda used another name, set `weights.gcsUri` in the profile. |
 | `fetch-model` log shows "fetching" for a long time | Expected on a node's first download (hundreds of GB). Other pods on the node wait on its lock. Later starts skip it. |
 | `ImagePullBackOff` | The node SA lacks `artifactregistry.reader`, or the image wasn't mirrored. Re-run `bundle.sh` with `IMAGE_REGISTRY`. |
 | `image ... is not in .cache/images.lock` | The profile uses an image the bundle doesn't have. Run `./bundle.sh profiles/<it>.yaml` on the connected side. |
@@ -593,7 +629,7 @@ pipeline {
 
 ## Appendix: reference
 
-**Profile keys:** `model`, `strategy`, `modelAlias`, `engine`, `nameTemplate`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel}`, `weights.{gcsUri, draftGcsUri}`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
+**Profile keys:** `model`, `strategy`, `modelAlias`, `engine`, `nameTemplate`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas, image}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel}`, `weights.{gcsUri, draftGcsUri}`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
 
 **Environment** (the same for every model, set by Jenkins):
 
@@ -601,8 +637,7 @@ pipeline {
 | --- | --- | --- |
 | `NAMESPACE` | `llm-d` | shared namespace |
 | `SERVICE_ACCOUNT` | `llm-d-modelserver` | pre-existing; model-server pods run as it |
-| `MODEL_BUCKET` | (unset) | `gs://` bucket with weights; unset = Hugging Face |
+| `MODEL_BUCKET` | `gs://models_registry` | bucket where garuda stores the weights |
 | `IMAGE_REGISTRY` | (unset) | private registry; needs `.cache/images.lock` |
 | `MODEL_CACHE_PATH` | `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models` | node-local weight cache |
 | `DOWNLOADER_IMAGE` | `gcr.io/google.com/cloudsdktool/google-cloud-cli:slim` | `fetch-model` image (mirrored by `bundle.sh`) |
-| `HF_TOKEN` | (unset) | only when `MODEL_BUCKET` is unset |
