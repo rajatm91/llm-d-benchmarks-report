@@ -37,6 +37,31 @@ What `deploy.sh` does to the upstream render so that models can coexist:
 
 The router chart always creates its own EPP ServiceAccount (`NAME-epp`) and RBAC, because the EPP needs to watch pods and pools. The pre-existing SA covers model-server pods only. Upstream model-server SAs carry no RBAC, so a plain SA (plus image-pull secrets or workload identity, if you use them) is enough.
 
+## 0a. Air-gapped deploy: `bundle.sh`
+
+On a machine **with** internet access:
+```bash
+IMAGE_REGISTRY=us-docker.pkg.dev/<proj>/llm-d \
+MODEL_BUCKET=gs://<bucket> \
+./bundle.sh                      # or: ./bundle.sh profiles/a.yaml profiles/b.yaml
+```
+1. **Renders every profile.** This fills `.cache/` (the pinned llm-d guides, the router chart under `.cache/charts/`, the InferencePool CRDs under `.cache/crds/`) and `.build/`.
+2. **Locks image digests.** Every image the renders use, plus the smoke-test image, is resolved to a digest in `.cache/images.lock`. Moving tags like `:main`, `:nightly` and `:latest` are frozen there.
+3. **Mirrors images** to `IMAGE_REGISTRY/<source host>/<path>` with crane, gcrane, skopeo or `docker buildx imagetools`. The copy is multi-arch and digest-preserving.
+4. **Uploads weights** of every profile's `model` and `draftModel` to `MODEL_BUCKET/<org>/<name>/`, skipping models already uploaded. Needs `hf` and `gcloud`.
+5. **Packs** this directory, including `.cache/`, into `dist/llm-d-bundle-<llmd sha>-<date>.tar.gz` (about 8 MB, since the weights live in GCS).
+
+Without `IMAGE_REGISTRY`, step 3 is skipped (mirror with your own tooling, using the paths above). Without `MODEL_BUCKET`, step 4 is skipped.
+
+Inside the air gap, unpack the tarball and deploy as usual:
+```bash
+export IMAGE_REGISTRY=us-docker.pkg.dev/<proj>/llm-d MODEL_BUCKET=gs://<bucket>
+./deploy.sh profiles/<name>.yaml
+```
+`deploy.sh` needs no network. It reads the guides and chart from `.cache/` and rewrites every image to `$IMAGE_REGISTRY/...@sha256:<digest>`. An image that is not in `images.lock` fails the render. A new profile or an `llmdRef` bump means re-running `bundle.sh` (with just the new profiles is fine; the lock is merged). `./test.sh` checks the air-gapped rewrite for every profile whenever `images.lock` exists.
+
+The router is applied from the rendered manifest (`kubectl apply --server-side`), like the model servers. The chart has no hooks or lookups, so this is what `helm install` would create, and it is exactly the manifest that `--dry-run` and Jenkins archive. All router objects carry `llm-d.ai/deployment=<name>`. Removing resources that disappeared between chart versions is not automatic: run `--delete` with the old render first.
+
 ## 0b. Model weights from GCS (air-gapped)
 
 Set `MODEL_BUCKET=gs://<bucket>` (env or Jenkins). Every model is then read from `gs://<bucket>/<org>/<name>/`, a plain copy of the HF repo files. Use `MODEL_GCS_URI` to override the path for one profile. No Hugging Face access and no `HF_TOKEN` are needed.
@@ -124,7 +149,7 @@ client ─► Gateway (agentgateway / GKE L7 / Istio)            ns: GATEWAY_NAM
                         └─ selector llm-d.ai/guide=<x> ─► model-server pods   ┘ chart + kustomize
 ```
 
-The pipeline installs `oci://ghcr.io/llm-d/charts/llm-d-router-gateway` with `httpRoute.create=true`, `httpRoute.inferenceGatewayName=$GATEWAY_NAME`, `httpRoute.inferenceGatewayNamespace=$GATEWAY_NAMESPACE` and `provider.name=$GATEWAY_PROVIDER`. The route and the pool share a namespace, so no `ReferenceGrant` is needed.
+The pipeline renders `oci://ghcr.io/llm-d/charts/llm-d-router-gateway` (cached in `.cache/charts/`) with `httpRoute.create=true`, `httpRoute.inferenceGatewayName=$GATEWAY_NAME`, `httpRoute.inferenceGatewayNamespace=$GATEWAY_NAMESPACE` and `provider.name=$GATEWAY_PROVIDER`. The route and the pool share a namespace, so no `ReferenceGrant` is needed.
 
 | Provider | Gateway prerequisites (one-time, cluster admin) | `GATEWAY_PROVIDER` renders |
 | --- | --- | --- |

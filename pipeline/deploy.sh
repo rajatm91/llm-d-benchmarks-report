@@ -45,6 +45,10 @@ MODEL_BUCKET=${MODEL_BUCKET:-}                          # e.g. gs://my-models  (
 MODEL_GCS_URI=""                                        # "" = $MODEL_BUCKET/$MODEL
 MODEL_CACHE_PATH=${MODEL_CACHE_PATH:-/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models}  # hostPath (GKE local SSD)
 DOWNLOADER_IMAGE=${DOWNLOADER_IMAGE:-gcr.io/google.com/cloudsdktool/google-cloud-cli:slim}
+SMOKE_IMAGE=${SMOKE_IMAGE:-docker.io/curlimages/curl:8.11.1}
+# Air-gapped: every image (model servers, router, init, smoke test) is rewritten to
+# $IMAGE_REGISTRY/<source host>/<path>@<digest>, digests from .cache/images.lock (written by bundle.sh).
+IMAGE_REGISTRY=${IMAGE_REGISTRY:-}                      # e.g. us-docker.pkg.dev/my-proj/llm-d
 DRAFT_MODEL=""                                          # HF id of a draft / EAGLE model for speculative decoding
 DRAFT_GCS_URI=""                                        # "" = $MODEL_BUCKET/$DRAFT_MODEL
 SPEC_CONFIG='{"num_speculative_tokens": 5}'             # vLLM --speculative-config; "model" is filled from DRAFT_MODEL
@@ -111,10 +115,12 @@ LLMD=$ROOT/.cache/llm-d-$LLMD_REF
 BUILD=$ROOT/.build/$NAME
 
 # ---- 1. fetch pinned llm-d ----------------------------------------------------
+# Everything fetched lands in .cache/, so a .cache/ copied from ./bundle.sh needs no network.
+OFFLINE_HINT="no network? run ./bundle.sh on a connected machine and copy its .cache/ here"
 if [[ ! -d $LLMD/guides ]]; then
   log "fetching llm-d@$LLMD_REF"
-  git init -q "$LLMD"
-  git -C "$LLMD" fetch -q --depth 1 https://github.com/llm-d/llm-d.git "$LLMD_REF"
+  rm -rf "$LLMD"; git init -q "$LLMD"
+  git -C "$LLMD" fetch -q --depth 1 https://github.com/llm-d/llm-d.git "$LLMD_REF" || { rm -rf "$LLMD"; die "cannot fetch llm-d@$LLMD_REF; $OFFLINE_HINT"; }
   git -C "$LLMD" checkout -q FETCH_HEAD
 fi
 
@@ -307,7 +313,7 @@ paste -d' ' <(echo "$OLD_WL") <(yq -N "select($WORKLOADS) | .metadata.name" "$BU
   while read -r o n; do echo "s#(x-k8s\\.io/name=)$o([^-a-z0-9]|\$)#\\1$n\\2#g"; done > "$BUILD/rename.sed"
 
 # ---- 3. render router ----------------------------------------------------------
-HELM_ARGS=(-n "$NAMESPACE" --version "$ROUTER_CHART_VERSION" -f "$LLMD/guides/recipes/router/base.values.yaml")
+HELM_ARGS=(-n "$NAMESPACE" -f "$LLMD/guides/recipes/router/base.values.yaml")
 i=0; for v in $ROUTER_VALUES; do i=$((i+1))
   sed -E -f "$BUILD/rename.sed" "$(abs "$v")" > "$BUILD/values-$i.yaml"; HELM_ARGS+=(-f "$BUILD/values-$i.yaml"); done
 # pool selects only this deployment's model-server pods (guide labels are shared across models)
@@ -323,14 +329,45 @@ else
   CHART=$ROUTER_STANDALONE_CHART
 fi
 for s in $ROUTER_SET; do HELM_ARGS+=(--set "$s"); done
-log "rendering router ($CHART, pool selector llm-d.ai/deployment=$NAME)"
-helm template "$NAME" "$CHART" "${HELM_ARGS[@]}" > "$BUILD/router.yaml"
+CHART_DIR=$ROOT/.cache/charts/$(basename "$CHART")-$ROUTER_CHART_VERSION
+if [[ ! -f $CHART_DIR/Chart.yaml ]]; then
+  log "pulling $CHART:$ROUTER_CHART_VERSION into .cache/charts"
+  rm -rf "$CHART_DIR.tmp"; mkdir -p "$CHART_DIR.tmp"
+  helm pull "$CHART" --version "$ROUTER_CHART_VERSION" --untar --untardir "$CHART_DIR.tmp" >/dev/null || die "cannot pull $CHART; $OFFLINE_HINT"
+  rm -rf "$CHART_DIR"; mv "$CHART_DIR.tmp/$(basename "$CHART")" "$CHART_DIR"; rm -rf "$CHART_DIR.tmp"
+fi
+log "rendering router ($CHART:$ROUTER_CHART_VERSION, pool selector llm-d.ai/deployment=$NAME)"
+helm template "$NAME" "$CHART_DIR" "${HELM_ARGS[@]}" > "$BUILD/router.yaml"
+# label everything the router render creates, so it can be found / deleted as one unit
+NAME=$NAME yq -i '.metadata.labels."llm-d.ai/deployment" = strenv(NAME)' "$BUILD/router.yaml"
+
+# ---- image rewrite (air-gapped) ---------------------------------------------------
+# docker.io/vllm/vllm-openai:v0.31.0 -> $IMAGE_REGISTRY/docker.io/vllm/vllm-openai@sha256:...
+norm_image() { local i=$1 h=${1%%/*}; [[ $i == */* && ( $h == *.* || $h == *:* || $h == localhost ) ]] || { [[ $i == */* ]] && i=docker.io/$i || i=docker.io/library/$i; }; echo "$i"; }
+mirror_image() {
+  local src; src=$(norm_image "$1")
+  local dig; dig=$(awk -v s="$src" '$1 == s { print $2 }' "$ROOT/.cache/images.lock" 2>/dev/null)
+  [[ -n $dig ]] || die "image $src is not in .cache/images.lock; re-run ./bundle.sh (with this profile) on a connected machine"
+  local repo=${src%@*}; [[ ${repo##*/} == *:* ]] && repo=${repo%:*}
+  echo "$IMAGE_REGISTRY/$repo@$dig"
+}
+if [[ -n $IMAGE_REGISTRY ]]; then
+  IMAGE_REGISTRY=${IMAGE_REGISTRY%/}
+  for f in "$BUILD/modelserver.yaml" "$BUILD/router.yaml"; do
+    while read -r img; do
+      [[ -z $img ]] && continue
+      new=$(mirror_image "$img") || exit 1
+      OLD=$img NEW=$new yq -i '(.. | select(tag == "!!map" and has("image") and .image == strenv(OLD)) | .image) = strenv(NEW)' "$f"
+    done < <(yq -N '.. | select(tag == "!!map" and has("image")) | .image' "$f" | sort -u)
+  done
+  SMOKE_IMAGE=$(mirror_image "$SMOKE_IMAGE") || exit 1
+fi
 
 if [[ $MODE == --dry-run ]]; then log "rendered to $BUILD/{modelserver,router}.yaml"; exit 0; fi
 
 if [[ $MODE == --delete ]]; then
-  helm uninstall "$NAME" -n "$NAMESPACE" --ignore-not-found
   kubectl delete -n "$NAMESPACE" -f "$BUILD/modelserver.yaml" --ignore-not-found
+  kubectl delete -n "$NAMESPACE" -f "$BUILD/router.yaml" --ignore-not-found
   exit 0
 fi
 [[ $MODE == deploy ]] || usage
@@ -341,7 +378,7 @@ kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || die "namespace $NAMESPACE 
 kubectl get serviceaccount "$SERVICE_ACCOUNT" -n "$NAMESPACE" >/dev/null 2>&1 ||
   die "ServiceAccount $NAMESPACE/$SERVICE_ACCOUNT not found (model-server pods run as this pre-existing SA)"
 kubectl get crd inferencepools.inference.networking.k8s.io >/dev/null 2>&1 ||
-  die "InferencePool CRD missing. Install: kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/latest/download/v1-manifests.yaml (GKE >=1.34.0-gke.1626000 with Gateway API enabled manages it)"
+  die "InferencePool CRD missing. Install: kubectl apply -f $ROOT/.cache/crds/inference-extension-v1.yaml (from bundle.sh), or let GKE >=1.34.0-gke.1626000 with Gateway API enabled manage it"
 if [[ -n $NEEDS_LWS ]]; then
   kubectl get crd leaderworkersets.leaderworkerset.x-k8s.io >/dev/null 2>&1 ||
     die "$NEEDS_LWS needs the LWS controller (>=v0.11.1, --set enableDisaggregatedSet=true). See $LLMD/guides/pd-disaggregation/README.md#prerequisites"
@@ -374,8 +411,11 @@ elif [[ -n ${HF_TOKEN:-} ]]; then
 else
   kubectl get secret llm-d-hf-token -n "$NAMESPACE" >/dev/null 2>&1 || die "export HF_TOKEN or create secret llm-d-hf-token in $NAMESPACE"
 fi
-log "installing router"
-helm upgrade --install "$NAME" "$CHART" "${HELM_ARGS[@]}" --wait --timeout 10m
+# The chart has no hooks or lookups, so its render is exactly what helm would install: apply the
+# reviewed/archived manifest itself (same as the model servers) instead of re-rendering in helm.
+log "applying router"
+kubectl apply -n "$NAMESPACE" --server-side -f "$BUILD/router.yaml"
+kubectl rollout status deployment -n "$NAMESPACE" -l "llm-d.ai/deployment=$NAME" --timeout=10m
 log "applying model servers"
 kubectl apply -n "$NAMESPACE" --server-side -f "$BUILD/modelserver.yaml"
 
@@ -396,7 +436,7 @@ else
   IP=$(kubectl get service "$NAME-epp" -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')
 fi
 log "smoke test via http://$IP/v1/completions"
-kubectl run "smoke-$NAME" --rm -i --restart=Never -n "$NAMESPACE" --image=curlimages/curl:8.11.1 -- \
+kubectl run "smoke-$NAME" --rm -i --restart=Never -n "$NAMESPACE" --image="$SMOKE_IMAGE" -- \
   curl -sS --fail-with-body -m 300 "http://$IP/v1/completions" -H 'Content-Type: application/json' \
   -d "{\"model\":\"$MODEL\",\"prompt\":\"Say hello.\",\"max_tokens\":16}"
 log "done: $NAME serving $MODEL at http://$IP"
