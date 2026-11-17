@@ -64,7 +64,7 @@ for p in profiles/*.yaml; do
         [[ $c == *"\\\"model\\\":\\\"$DRAFT_MODEL\\\""* ]] || fail "$NAME" "spec config lacks draft model $DRAFT_MODEL"
       done <<<"$cmds"
     fi
-    [[ $(yq -N "$v | .containers[] | select(((.command // []) + (.args // [])) | join(\" \") | test(\"vllm\\s+serve\")) | (.env[] | select(.name == \"HF_HUB_OFFLINE\") | .value) + \":\" + (.volumeMounts[] | select(.name == \"model-cache\") | .mountPath)" "$B/modelserver.yaml" | sort -u) == "1:/model-cache" ]] || fail "$NAME" "vLLM container not offline / missing model-cache mount"
+    [[ $(yq -N "$v | .containers[] | select(((.command // []) + (.args // [])) | join(\" \") | test(\"vllm\\s+serve\")) | (.env[] | select(.name == \"HF_HUB_OFFLINE\") | .value) + \":\" + (.volumeMounts[] | select(.name == \"model-cache\") | .mountPath + \":\" + (.readOnly | tostring))" "$B/modelserver.yaml" | sort -u) == "1:/model-cache:true" ]] || fail "$NAME" "vLLM container not offline / model-cache not mounted read-only"
     ! grep -q 'llm-d-hf-token' "$B/modelserver.yaml" || fail "$NAME" "still references the HF token secret"
     [[ -z $(yq -N "select(($WORKLOADS) | not) | .. | select(tag == \"!!map\" and has(\"initContainers\")) | .initContainers[] | select(.name == \"fetch-model\") | .name" "$B/modelserver.yaml") ]] || fail "$NAME" "fetch-model injected into a non-model-server pod"
     # HTTPRoute attaches to the existing Gateway and points at this release's pool

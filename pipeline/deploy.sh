@@ -289,8 +289,10 @@ EOF'
       .volumes = [(.volumes // [])[] | select(.name != \"model-cache\")] + [{\"name\": \"model-cache\", \"hostPath\": {\"path\": strenv(HP), \"type\": \"DirectoryOrCreate\"}}] |
       (.containers[] | select($VLLM_CTR)) |= (
         .env = [(.env // [])[] | select(.name | test(\"^(HF_TOKEN|HF_HOME|HF_HUB_OFFLINE|TRANSFORMERS_OFFLINE)$\") | not)]
-               + [{\"name\": \"HF_HOME\", \"value\": \"/model-cache\"}, {\"name\": \"HF_HUB_OFFLINE\", \"value\": \"1\"}, {\"name\": \"TRANSFORMERS_OFFLINE\", \"value\": \"1\"}] |
-        .volumeMounts = (.volumeMounts // []) + [{\"name\": \"model-cache\", \"mountPath\": \"/model-cache\"}]
+               + [{\"name\": \"HF_HOME\", \"value\": \"/model-cache\"}, {\"name\": \"HF_HUB_OFFLINE\", \"value\": \"1\"}, {\"name\": \"TRANSFORMERS_OFFLINE\", \"value\": \"1\"},
+                  {\"name\": \"HF_MODULES_CACHE\", \"value\": \"/tmp/hf-modules\"}] |
+        # read-only: only fetch-model writes the shared node cache, so one model server can't tamper with another's weights
+        .volumeMounts = (.volumeMounts // []) + [{\"name\": \"model-cache\", \"mountPath\": \"/model-cache\", \"readOnly\": true}]
       )
     )
   " "$BUILD/modelserver.yaml"
@@ -366,7 +368,8 @@ fi
 if [[ -z $NEEDS_HF_SECRET ]]; then
   :   # weights come from GCS; no Hugging Face token needed
 elif [[ -n ${HF_TOKEN:-} ]]; then
-  kubectl create secret generic llm-d-hf-token --from-literal="HF_TOKEN=$HF_TOKEN" -n "$NAMESPACE" \
+  # token via stdin, not argv (argv is visible in ps / process listings)
+  printf %s "$HF_TOKEN" | kubectl create secret generic llm-d-hf-token --from-file=HF_TOKEN=/dev/stdin -n "$NAMESPACE" \
     --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 else
   kubectl get secret llm-d-hf-token -n "$NAMESPACE" >/dev/null 2>&1 || die "export HF_TOKEN or create secret llm-d-hf-token in $NAMESPACE"
