@@ -1,0 +1,18 @@
+# COMBO: P/D disaggregation + tiered prefix cache (CPU tier on prefill).
+# Prefill keeps evicted prefixes in 100 GiB of CPU RAM (MultiConnector = NIXL + OffloadingConnector),
+# router's prefill profile treats GPU- and CPU-resident prefixes as hits.
+model: openai/gpt-oss-120b
+strategy: pd-tiered-cpu
+modelserver:
+  overlay: guides/pd-disaggregation/modelserver/gpu/vllm/gke
+  components:
+    - guides/recipes/modelserver/components/disaggregatedset-schema
+    - combos/pd-tiered-cpu
+router:
+  values:
+    - guides/pd-disaggregation/router/pd-disaggregation.values.yaml
+    - combos/pd-tiered-cpu/router.values.yaml
+gateway:
+  provider: agentgateway
+  name: llm-d-inference-gateway
+  namespace: agentgateway-system

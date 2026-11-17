@@ -1,0 +1,13 @@
+# P/D disaggregation: 1 prefill (TP=1) + 1 decode (TP=4) DisaggregatedSet, NIXL KV transfer
+# over RDMA. gpt-oss-120b on H200. Needs LWS >= v0.11.1 with enableDisaggregatedSet=true.
+model: openai/gpt-oss-120b
+strategy: pd
+modelserver:
+  overlay: guides/pd-disaggregation/modelserver/gpu/vllm/gke
+router:
+  values:
+    - guides/pd-disaggregation/router/pd-disaggregation.values.yaml
+gateway:
+  provider: gke
+  name: llm-d-inference-gateway
+  namespace: gateway-infra

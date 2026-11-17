@@ -1,0 +1,13 @@
+# Optimized baseline (prefix-cache affinity + token-load routing), aggregated vLLM.
+# Qwen3-32B, 2 replicas x TP=2 on H100/H200 (4 GPUs). Attaches to an existing agentgateway Gateway.
+model: Qwen/Qwen3-32B
+strategy: baseline
+modelserver:
+  overlay: guides/optimized-baseline/modelserver/gpu/vllm/base
+router:
+  values:
+    - guides/optimized-baseline/router/optimized-baseline.values.yaml
+gateway:
+  provider: agentgateway
+  name: llm-d-inference-gateway
+  namespace: agentgateway-system

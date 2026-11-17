@@ -1,0 +1,52 @@
+# Combo component: P/D disaggregation + CPU KV tier on the prefill role.
+# Layer on guides/pd-disaggregation/modelserver/gpu/vllm/{base,gke,...}.
+#
+# Same pattern upstream uses for GLM-5.2 (wide-EP + P/D + tiered): prefill keeps NIXL as
+# the KV *producer* for decode and adds vLLM's OffloadingConnector so prefixes evicted from
+# HBM stay reusable from CPU RAM. Decode is untouched (it only consumes KV from prefill).
+#
+# Needs guides/recipes/modelserver/components/disaggregatedset-schema listed BEFORE this
+# component (merge keys for roles/containers/volumes). Args are a plain list, so the
+# connector flag is patched by index; the `test` ops fail the render if upstream reorders them.
+# vLLM keeps the CPU tier in /dev/shm, so tier size, shm sizeLimit and pod memory move together:
+#   cpu_bytes_to_use 100 GiB -> shm 110Gi -> memory 140Gi. Change all three, plus
+#   lruCapacityPerServer in router.values.yaml.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      kind: DisaggregatedSet
+      name: pd-disagg-vllm
+    patch: |-
+      - op: test
+        path: /spec/roles/0/name
+        value: prefill
+      - op: test
+        path: /spec/roles/0/spec/leaderWorkerTemplate/workerTemplate/spec/containers/0/name
+        value: modelserver
+      - op: test
+        path: /spec/roles/0/spec/leaderWorkerTemplate/workerTemplate/spec/containers/0/args/7
+        value: --kv-transfer-config
+      - op: replace
+        path: /spec/roles/0/spec/leaderWorkerTemplate/workerTemplate/spec/containers/0/args/8
+        value: '{"kv_connector":"MultiConnector","kv_role":"kv_both","kv_connector_extra_config":{"connectors":[{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_buffer_device":"cuda","kv_connector_extra_config":{"backends":["UCX"]}},{"kv_connector":"OffloadingConnector","kv_role":"kv_both","kv_connector_extra_config":{"cpu_bytes_to_use":107374182400,"eviction_policy":"lru"}}]}}'
+  - patch: |-
+      apiVersion: disaggregatedset.x-k8s.io/v1
+      kind: DisaggregatedSet
+      metadata:
+        name: pd-disagg-vllm
+      spec:
+        roles:
+          - name: prefill
+            spec:
+              leaderWorkerTemplate:
+                workerTemplate:
+                  spec:
+                    containers:
+                      - name: modelserver
+                        resources:
+                          limits: {memory: 140Gi}
+                          requests: {memory: 140Gi}
+                    volumes:
+                      - name: shm
+                        emptyDir: {medium: Memory, sizeLimit: 110Gi}

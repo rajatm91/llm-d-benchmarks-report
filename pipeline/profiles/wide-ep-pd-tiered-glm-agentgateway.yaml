@@ -1,0 +1,17 @@
+# COMBO (upstream-composed): wide-EP + P/D + CPU/NVMe tiered KV offload + MTP.
+# GLM-5.2-FP8, p3w2d1w2 = 3 DEP16 prefill + 1 DEP16 decode, 8 nodes / 64 H200, InfiniBand.
+# The tiering is the offloading-tiered component already included by deployments/default;
+# swap to deployments/<topology> + components/offloading-cpu for CPU-only tier.
+model: zai-org/GLM-5.2-FP8
+strategy: wide-ep-pd-tiered
+modelserver:
+  overlay: guides/models/glm-5-2/modelserver/gpu/vllm/deployments/default
+router:
+  values:
+    - guides/models/glm-5-2/router/glm-5-2.values.yaml
+    - guides/models/glm-5-2/router/glm-5.2-overrides.values.yaml
+gateway:
+  provider: agentgateway
+  name: llm-d-inference-gateway
+  namespace: agentgateway-system
+waitTimeout: 120m
