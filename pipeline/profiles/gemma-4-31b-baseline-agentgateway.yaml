@@ -1,0 +1,17 @@
+# Gemma 4 31B-it (BF16, ~62 GB, multimodal) on the optimized baseline, 2 replicas x TP=2 (H100-80GB).
+# Supported by the overlay's vLLM image (v0.31.0). No tool/reasoning parser set: there is no vLLM
+# recipe for it yet; add the ones the vLLM docs list for Gemma 4 under modelserver.args.
+# The google/gemma-4-31B-it-assistant MTP drafter (Gemma4MTP) needs a vLLM newer than v0.31.0.
+model: google/gemma-4-31B-it
+strategy: baseline
+modelserver:
+  overlay: guides/optimized-baseline/modelserver/gpu/vllm/base
+  tensorParallel: 2
+  replicas: 2
+router:
+  values:
+    - guides/optimized-baseline/router/optimized-baseline.values.yaml
+gateway:
+  provider: agentgateway
+  name: llm-d-inference-gateway
+  namespace: agentgateway-system

@@ -1,0 +1,23 @@
+# Qwen3.8-27B (BF16, ~56 GB) on the optimized baseline, with its built-in MTP speculative decoding
+# (no separate draft model). Flags from the vLLM recipe: https://recipes.vllm.ai/Qwen/Qwen3.8-27B
+# tensorParallel 1 assumes H200/B200-class GPUs; use 2 on H100-80GB.
+model: Qwen/Qwen3.8-27B
+strategy: baseline
+speculativeConfig:
+  method: mtp
+  num_speculative_tokens: 3
+modelserver:
+  overlay: guides/optimized-baseline/modelserver/gpu/vllm/base
+  tensorParallel: 1
+  replicas: 2
+  args:
+    - --enable-auto-tool-choice
+    - --tool-call-parser=qwen3_coder
+    - --reasoning-parser=qwen3
+router:
+  values:
+    - guides/optimized-baseline/router/optimized-baseline.values.yaml
+gateway:
+  provider: agentgateway
+  name: llm-d-inference-gateway
+  namespace: agentgateway-system

@@ -1,0 +1,13 @@
+# Tiered prefix cache: HBM -> CPU RAM (vLLM native OffloadingConnector, 300 GiB/replica).
+# Router keeps two prefix indexes (GPU + CPU) and scores both. Qwen3-32B, 2 x TP=2.
+model: Qwen/Qwen3-32B
+strategy: tiered-cpu
+modelserver:
+  overlay: guides/tiered-prefix-cache/modelserver/gpu/vllm/native/cpu/gke
+router:
+  values:
+    - guides/tiered-prefix-cache/router/single-host/tiered-prefix-cache-cpu.values.yaml
+gateway:
+  provider: gke
+  name: llm-d-inference-gateway
+  namespace: gateway-infra

@@ -1,0 +1,51 @@
+## Combo router values: P/D + CPU KV tier on prefill.
+## Layer AFTER guides/pd-disaggregation/router/pd-disaggregation.values.yaml.
+## Same plugin graph as the P/D guide, but the prefix index is sized for GPU + CPU blocks so
+## the prefix-cache-affinity-filter counts a CPU-tier hit as "warm" when it picks a prefill pod
+## (the pattern guides/models/glm-5-2/router/glm-5.2-overrides.values.yaml uses).
+router:
+  epp:
+    pluginsCustomConfig:
+      pd-config.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: always-disagg-pd-decider
+        - type: disagg-profile-handler
+          parameters:
+            deciders:
+              prefill: always-disagg-pd-decider
+        - type: prefill-filter
+        - type: decode-filter
+        # Fixed capacity: autoTune would size from GPU blocks only and forget the CPU tier.
+        # gpt-oss-120b KV ~72 KiB/token -> 4.5 MiB per 64-token router block.
+        #   GPU (H200, TP=1, ~60 GB KV after weights): ~13,000 blocks
+        #   CPU (cpu_bytes_to_use 100 GiB):            ~22,700 blocks
+        # Estimate; recompute for your model/tier (see tiered-prefix-cache README).
+        - type: approx-prefix-cache-producer
+          parameters:
+            autoTune: false
+            blockSizeTokens: 64
+            lruCapacityPerServer: 35700
+            maxPrefixTokensToMatch: 131072
+        - type: inflight-load-producer
+        - type: prefix-cache-affinity-filter
+          parameters:
+            # From the P/D guide (gpt-oss-120b, H200). CPU-tier restores are slower than HBM
+            # hits; re-measure with guides/recipes/router/calibration on this combo.
+            peakPrefillThroughput: 33821
+        - type: token-load-scorer
+        - type: active-request-scorer
+        - type: max-score-picker
+        schedulingProfiles:
+        - name: prefill
+          plugins:
+          - pluginRef: prefill-filter
+          - pluginRef: prefix-cache-affinity-filter
+          - pluginRef: token-load-scorer
+          - pluginRef: max-score-picker
+        - name: decode
+          plugins:
+          - pluginRef: decode-filter
+          - pluginRef: active-request-scorer
+          - pluginRef: max-score-picker

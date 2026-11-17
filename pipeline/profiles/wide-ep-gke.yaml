@@ -1,0 +1,14 @@
+# Wide expert parallelism (always P/D): DeepSeek-R1-0528, prefill DP16/EP16 + decode DP16/EP16,
+# 32 x H200 over 4 nodes, DeepEP all-to-all + NIXL. Needs full-mesh RDMA and LWS w/ DisaggregatedSet.
+model: deepseek-ai/DeepSeek-R1-0528
+strategy: wide-ep
+modelserver:
+  overlay: guides/wide-ep/modelserver/gpu/vllm/gke
+router:
+  values:
+    - guides/wide-ep/router/wide-ep.values.yaml
+    - guides/wide-ep/router/gpu.values.yaml
+gateway:
+  provider: gke
+  name: llm-d-inference-gateway
+  namespace: gateway-infra

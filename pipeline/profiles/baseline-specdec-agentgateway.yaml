@@ -1,0 +1,17 @@
+# Optimized baseline + speculative decoding with a separate draft model.
+# Qwen3-32B target, Qwen3-0.6B draft (same tokenizer), 2 replicas x TP=2. Both models are read
+# from the same bucket when MODEL_BUCKET is set: gs://<bucket>/Qwen/Qwen3-32B and .../Qwen3-0.6B.
+model: Qwen/Qwen3-32B
+strategy: baseline-specdec
+draftModel: Qwen/Qwen3-0.6B
+speculativeConfig:
+  num_speculative_tokens: 5
+modelserver:
+  overlay: guides/optimized-baseline/modelserver/gpu/vllm/base
+router:
+  values:
+    - guides/optimized-baseline/router/optimized-baseline.values.yaml
+gateway:
+  provider: agentgateway
+  name: llm-d-inference-gateway
+  namespace: agentgateway-system
