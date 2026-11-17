@@ -90,6 +90,23 @@ role() { yq -N "select(.kind==\"DisaggregatedSet\") | .spec.roles[] | select(.na
 [[ $(role prefill '.volumes | length') == $(role decode '.volumes | length') ]] || fail pd-tiered "prefill lost volumes during merge"
 W=.build/$(./deploy.sh profiles/wide-ep-gke.yaml --name)/router.yaml
 [[ $(yq -N 'select(.kind=="InferencePool") | .spec.targetPorts | length' "$W") == 8 ]] || fail wide-ep "pool must target all 8 DP rank ports"
+# modelserver.image: replaces the vLLM containers' image only; sidecars / init / helper containers keep theirs
+T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+imgs() { yq -N '.. | select(tag == "!!map" and has("containers")) | ((.initContainers // [])[], .containers[]) | .name + " " + .image' "$1" | sort; }
+for p in profiles/pd-gke.yaml profiles/wide-ep-pd-tiered-glm-agentgateway.yaml; do
+  n=$(./deploy.sh "$p" --name)
+  ./deploy.sh "$p" --dry-run >/dev/null 2>&1; imgs ".build/$n/modelserver.yaml" > "$T/before"
+  yq '.modelserver.image = "registry.test/vllm-custom:1.2.3"' "$p" > "$T/img.yaml"
+  ./deploy.sh "$T/img.yaml" --dry-run >/dev/null 2>&1 || fail "$n" "render with modelserver.image failed"
+  imgs ".build/$n/modelserver.yaml" > "$T/after"
+  vllm=$(yq -N '.. | select(tag == "!!map" and has("containers")) | .containers[] | select(((.command // []) + (.args // [])) | join(" ") | test("vllm\\s+serve")) | .name' ".build/$n/modelserver.yaml" | sort -u)
+  while read -r c img; do
+    if grep -qx "$c" <<<"$vllm"; then [[ $img == registry.test/vllm-custom:1.2.3 ]] || fail "$n" "vLLM container $c kept $img"
+    else grep -qx "$c $img" "$T/before" || fail "$n" "non-vLLM container $c changed to $img"; fi
+  done < "$T/after"
+done
+echo "ok  modelserver.image overrides only vLLM containers"
+
 # air-gapped mode (needs .cache/images.lock from ./bundle.sh): every image -> registry, pinned by digest
 if [[ -f .cache/images.lock ]]; then
   for p in profiles/*.yaml; do

@@ -55,6 +55,7 @@ DRAFT_MODEL=""                                          # HF id of a draft / EAG
 DRAFT_GCS_URI=""                                        # "" = $MODEL_BUCKET/<folder of DRAFT_MODEL>
 SPEC_CONFIG='{"num_speculative_tokens": 5}'             # vLLM --speculative-config; "model" is filled from DRAFT_MODEL
 MS_ARGS_JSON='[]'; MS_TP=""; MS_REPLICAS=""                # modelserver.args / tensorParallel / replicas
+MS_IMAGE=""                                             # modelserver.image: replaces the overlay's vLLM image
 
 log() { printf '\033[1;34m==> %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
@@ -65,7 +66,7 @@ yq -e 'tag == "!!map"' "$PROFILE" >/dev/null 2>&1 || die "$PROFILE is not a YAML
 # unknown keys are typos: fail instead of silently using a default
 BAD=$(yq -N '(keys - ["model","modelAlias","strategy","engine","nameTemplate","draftModel","speculativeConfig",
                       "modelserver","router","gateway","weights","llmdRef","waitTimeout"])
-  + ((.modelserver // {}) | keys - ["overlay","components","patches","args","tensorParallel","replicas"] | map("modelserver." + .))
+  + ((.modelserver // {}) | keys - ["overlay","components","patches","args","tensorParallel","replicas","image"] | map("modelserver." + .))
   + ((.router // {}) | keys - ["mode","values","set","chartVersion"] | map("router." + .))
   + ((.gateway // {}) | keys - ["provider","name","namespace","baseModel"] | map("gateway." + .))
   + ((.weights // {}) | keys - ["gcsUri","draftGcsUri"] | map("weights." + .)) | .[]' "$PROFILE")
@@ -79,7 +80,7 @@ eval "$(yq -N '
     ["COMPONENTS", (.modelserver.components | select(. != null) | join(" "))],
     ["PATCHES", (.modelserver.patches | select(. != null) | join(" "))],
     ["MS_ARGS_JSON", (.modelserver.args | select(. != null) | @json)],
-    ["MS_TP", .modelserver.tensorParallel], ["MS_REPLICAS", .modelserver.replicas],
+    ["MS_TP", .modelserver.tensorParallel], ["MS_REPLICAS", .modelserver.replicas], ["MS_IMAGE", .modelserver.image],
     ["ROUTER_MODE", .router.mode], ["ROUTER_CHART_VERSION", .router.chartVersion],
     ["ROUTER_VALUES", (.router.values | select(. != null) | join(" "))],
     ["ROUTER_SET", (.router.set | select(. != null) | join(" "))],
@@ -108,7 +109,7 @@ GATEWAY_NAMESPACE=${GATEWAY_NAMESPACE:-$NAMESPACE}
 [[ $MODE == --name ]] && { echo "$NAME"; exit 0; }
 if [[ $MODE == --env ]]; then
   for v in NAME NAMESPACE SERVICE_ACCOUNT MODEL STRATEGY ENGINE DRAFT_MODEL SPEC_CONFIG MODELSERVER_OVERLAY COMPONENTS PATCHES \
-           ROUTER_MODE ROUTER_VALUES MS_TP MS_REPLICAS MS_ARGS_JSON SPEC_SET GATEWAY_PROVIDER GATEWAY_NAME GATEWAY_NAMESPACE BASE_MODEL MODEL_BUCKET LLMD_REF WAIT_TIMEOUT; do
+           ROUTER_MODE ROUTER_VALUES MS_TP MS_REPLICAS MS_ARGS_JSON MS_IMAGE SPEC_SET GATEWAY_PROVIDER GATEWAY_NAME GATEWAY_NAMESPACE BASE_MODEL MODEL_BUCKET LLMD_REF WAIT_TIMEOUT; do
     printf '%s=%q\n' "$v" "${!v}"; done
   exit 0
 fi
@@ -175,6 +176,16 @@ NAME=$NAME SA=$SERVICE_ACCOUNT STRATEGY=$STRATEGY ENGINE=$ENGINE MODEL_SLUG=$MOD
 NEEDS_LWS=$(yq -N 'select(.kind == "LeaderWorkerSet" or .kind == "DisaggregatedSet") | .kind' "$BUILD/modelserver.yaml" | head -1)
 VLLM_CTR='((.command // []) + (.args // [])) | join(" ") | test("vllm\s+serve")'
 VLLM_POD=".. | select(tag == \"!!map\" and has(\"containers\")) | select([.containers[] | $VLLM_CTR] | any_c(.))"
+
+# ---- vLLM image override (modelserver.image) ----------------------------------------
+# Only containers that run `vllm serve`; sidecars and init containers keep their images. Applied
+# before the air-gap rewrite, so bundle.sh locks/mirrors it and IMAGE_REGISTRY pins it by digest.
+if [[ -n $MS_IMAGE ]]; then
+  [[ $MS_IMAGE != *[[:space:]]* && ( ${MS_IMAGE##*/} == *:?* || $MS_IMAGE == *@sha256:* ) ]] ||
+    die "modelserver.image must name a tag or digest (e.g. docker.io/vllm/vllm-openai:v0.32.0), got: $MS_IMAGE"
+  log "vLLM image: $MS_IMAGE"
+  IMG=$MS_IMAGE yq -i "($VLLM_POD | .containers[] | select($VLLM_CTR) | .image) = strenv(IMG)" "$BUILD/modelserver.yaml"
+fi
 
 # vLLM command text of every model-server container, one JSON string per container
 vllm_cmds() { yq -o=json -I=0 "$VLLM_POD | .containers[] | select($VLLM_CTR) | ((.command // []) + (.args // [])) | join(\" \")" "$BUILD/modelserver.yaml"; }

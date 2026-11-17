@@ -117,6 +117,7 @@ modelserver:
 ```
 - **Model id:** the overlay's reference id (found through its `llm-d.ai/model` label) is replaced in every vLLM command (list args or bash script, including the KV-events topic) and in the `llm-d.ai/model` labels and selector.
 - **Old model's flags:** its model-specific flags (`--tool-call-parser`, `--reasoning-parser`, `--chat-template`, `--enable-auto-tool-choice`) are dropped. Put the new model's flags in `args`. They are inserted right after the model id, or appended for list-form overlays, and shell-quoted, so JSON values are safe.
+- **vLLM image:** `modelserver.image` swaps the image of every container that runs `vllm serve`; sidecars, `fetch-model` and helper containers keep theirs. It must name a tag or digest. `bundle.sh` picks it up like any other image (lock + mirror), and with `IMAGE_REGISTRY` it is pinned by digest.
 - **Sizing:** `tensorParallel` rewrites the TP flag and the GPU limits and requests, and `replicas` sets the Deployment replicas. Both work on aggregated overlays (baseline, tiered) only. P/D and wide-EP size each role differently, so use `modelserver.patches` or an upstream `guides/models/*` recipe there.
 - **Check first:** confirm the overlay's vLLM image supports the architecture (v0.31.0 supports Gemma 4 and Qwen3.5/3.8) and take flags from the model's vLLM recipe (`recipes.vllm.ai/<org>/<model>`). The render cannot check that the model fits in GPU memory.
 
@@ -227,6 +228,7 @@ modelserver:
   tensorParallel: 2                  # aggregated overlays only: --tensor-parallel-size + GPU count
   replicas: 2                        # aggregated overlays only
   args: [--enable-auto-tool-choice, --tool-call-parser=qwen3_coder]   # the model's own vLLM flags
+  image: docker.io/vllm/vllm-openai:v0.32.0   # replaces the overlay's vLLM image (vLLM containers only)
 router:
   values: [guides/optimized-baseline/router/optimized-baseline.values.yaml]   # layered in order, last wins
   set: []                            # extra helm --set

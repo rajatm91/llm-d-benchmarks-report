@@ -416,6 +416,35 @@ data:
 
 If routes already exist on the Gateway and `baseModel` is not set, `deploy.sh` stops.
 
+### Sample J: newer vLLM image, one GPU per node (5 × g4-standard-48)
+
+A `g4-standard-48` has **one** NVIDIA RTX PRO 6000 (96 GB). Gemma 4 31B in BF16 (about 62.5 GB) fits on it, so run one whole-GPU replica per node. TP across nodes would go over the network.
+
+```yaml
+# profile: profiles/gemma-4-31b-g4-agentgateway.yaml
+model: google/gemma-4-31B-it              # gs://models_registry/google__gemma_4_31b_it
+strategy: g4                              # → name gemma-4-31b-it-g4-vllm
+modelserver:
+  overlay: guides/optimized-baseline/modelserver/gpu/vllm/base
+  image: docker.io/vllm/vllm-openai:v0.32.0   # newer vLLM than the overlay's v0.31.0 (vLLM containers only)
+  tensorParallel: 1                       # whole model on the one GPU
+  replicas: 5                             # = nodes × GPUs per node (5 × 1)
+  args:
+    - --max-model-len=32768               # ~24 GB left for KV cache after BF16 weights; check the startup log
+    # - --quantization=fp8                # optional: weights ~31 GB → ~55 GB for KV cache
+router:
+  values:
+    - guides/optimized-baseline/router/optimized-baseline.values.yaml
+gateway:
+  provider: agentgateway
+  name: llm-d-inference-gateway
+  namespace: agentgateway-system
+```
+
+- **Replica count:** `replicas` = nodes × GPUs per node ÷ `tensorParallel`. Each pod requests the node's only GPU, so the scheduler puts exactly one on each node.
+- **Node pool:** to keep the pods on the G4 pool, add a `nodeSelector` (`cloud.google.com/gke-nodepool: <pool>`) and a `nvidia.com/gpu` toleration through `modelserver.patches`, as in sample I.
+- **New image:** with a new `image`, re-run `./bundle.sh` for this profile so the image is locked and mirrored. Otherwise the air-gapped render stops with "image ... is not in .cache/images.lock".
+
 ### Sample I: changing what an overlay hard-codes (patch)
 
 For anything without a profile field, such as memory or GPU count per P/D role, add a kustomize patch:
@@ -517,6 +546,7 @@ Clients always send the **Hugging Face model id**, even though the weights come 
 | New weights for the same model | Have garuda store them in a **new folder**, set `weights.gcsUri` to it, and redeploy. Nodes cache by path, so new files under the same path are not re-downloaded. |
 | Add a model | Make sure garuda has stored it in `gs://models_registry/<folder>/`, write a profile, run `./bundle.sh profiles/<new>.yaml` on the connected side if it needs new images, then deploy. |
 | Remove a deployment | `./deploy.sh <profile> --delete`. This removes exactly the rendered model-server and router objects. The ServiceAccount, namespace and Gateway stay. |
+| Upgrade vLLM for one model | Set `modelserver.image` (tag or digest), run `./bundle.sh profiles/<it>.yaml` on the connected side, then deploy. Only that model's vLLM containers change. |
 | Upgrade llm-d | Change `llmdRef` (or `LLMD_REF`), run `./test.sh`, and re-run `./bundle.sh`. If upstream moved or reordered something, the render fails before anything reaches a cluster. |
 | Free node disk | Delete old model folders under `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models/hub/` on the node. The cache is never evicted automatically. |
 
@@ -599,7 +629,7 @@ pipeline {
 
 ## Appendix: reference
 
-**Profile keys:** `model`, `strategy`, `modelAlias`, `engine`, `nameTemplate`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel}`, `weights.{gcsUri, draftGcsUri}`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
+**Profile keys:** `model`, `strategy`, `modelAlias`, `engine`, `nameTemplate`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas, image}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel}`, `weights.{gcsUri, draftGcsUri}`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
 
 **Environment** (the same for every model, set by Jenkins):
 
