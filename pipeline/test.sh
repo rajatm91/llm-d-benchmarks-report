@@ -5,7 +5,10 @@ set -euo pipefail
 cd "$(dirname "$0")"
 fail() { echo "FAIL [$1]: $2" >&2; exit 1; }
 SA=${SERVICE_ACCOUNT:-llm-d-modelserver}
-export MODEL_BUCKET=${MODEL_BUCKET:-gs://llm-d-test-models}   # air-gapped mode: weights from GCS
+export MODEL_BUCKET=${MODEL_BUCKET:-gs://llm-d-test-models}   # weights always come from GCS (garuda layout)
+# garuda folder naming, spelled out independently of deploy.sh's implementation
+folder() { python3 -c 'import re,sys; o,n=sys.argv[1].lower().split("/",1); print(re.sub(r"[^a-z0-9_]+","_",o)+"__"+re.sub(r"[^a-z0-9_]+","_",n))' "$1"; }
+[[ $(folder google/gemma-4-31B-it) == google__gemma_4_31b_it ]] || fail layout "folder() disagrees with garuda's documented example"
 WORKLOADS='.kind == "Deployment" or .kind == "LeaderWorkerSet" or .kind == "DisaggregatedSet"'
 POD_LABELS='.. | select(tag == "!!map" and has("metadata") and (.spec | tag) == "!!map" and (.spec | has("containers"))) | .metadata.labels'
 # exit 0 if every selector label is on the pod labels: matches <selector-json> <labels-json>
@@ -38,8 +41,8 @@ for p in profiles/*.yaml; do
     # GCS weights: every vLLM pod fetches first, loads offline, never needs the HF token
     v='.. | select(tag == "!!map" and has("containers")) | select([.containers[] | ((.command // []) + (.args // [])) | join(" ")] | any_c(test("vllm\\s+serve")))'
     [[ $(yq -N "$v | .initContainers[0].name" "$B/modelserver.yaml" | sort -u) == fetch-model ]] || fail "$NAME" "vLLM pod without fetch-model as first init container"
-    want="models--${MODEL//\//--} ${MODEL_BUCKET%/}/$MODEL"
-    [[ -z $DRAFT_MODEL ]] || want+=$'\n'"models--${DRAFT_MODEL//\//--} ${MODEL_BUCKET%/}/$DRAFT_MODEL"
+    want="models--${MODEL//\//--} ${MODEL_BUCKET%/}/$(folder "$MODEL")"
+    [[ -z $DRAFT_MODEL ]] || want+=$'\n'"models--${DRAFT_MODEL//\//--} ${MODEL_BUCKET%/}/$(folder "$DRAFT_MODEL")"
     [[ $(yq -o=json -I=0 "$v | .initContainers[0].env[] | select(.name == \"MODELS\") | .value" "$B/modelserver.yaml" | sort -u) == "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$want")" ]] ||
       fail "$NAME" "fetch-model MODELS is not: $want"
     # model swap: every vLLM command runs MODEL, pods are labelled with it, no foreign model id left

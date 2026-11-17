@@ -12,7 +12,7 @@
 # combined), the router values to layer, and the existing Gateway to attach to.
 #
 # Environment-wide settings come from the environment (Jenkins): NAMESPACE, SERVICE_ACCOUNT,
-# MODEL_BUCKET, MODEL_CACHE_PATH, DOWNLOADER_IMAGE, HF_TOKEN. Every model shares one namespace and
+# MODEL_BUCKET, MODEL_CACHE_PATH, DOWNLOADER_IMAGE, IMAGE_REGISTRY. Every model shares one namespace and
 # one pre-existing ServiceAccount; all resources are named <model>-<strategy>-<engine>.
 set -euo pipefail
 
@@ -39,10 +39,12 @@ SERVICE_ACCOUNT=${SERVICE_ACCOUNT:-llm-d-modelserver}   # pre-existing in NAMESP
 NAME_TEMPLATE='{model}-{strategy}-{engine}'
 MODEL_ALIAS=""                 # short model slug when the HF name makes NAME too long
 ENGINE=""                      # "" = inferred from MODELSERVER_OVERLAY (vllm | sglang | trtllm)
-# Weights from GCS instead of Hugging Face: an init container copies gs://<bucket>/<org>/<name>/
-# to node-local disk once per node, vLLM loads it offline. "" = upstream behaviour (download from HF).
-MODEL_BUCKET=${MODEL_BUCKET:-}                          # e.g. gs://my-models  (env / Jenkins)
-MODEL_GCS_URI=""                                        # "" = $MODEL_BUCKET/$MODEL
+# Weights are already in GCS (downloaded and stored by the garuda repo), one folder per model:
+#   gs://models_registry/<org>__<name>  with the HF id lowercased and other non-alphanumerics -> "_"
+#   e.g. google/gemma-4-31B-it -> gs://models_registry/google__gemma_4_31b_it
+# An init container copies it to node-local disk once per node; vLLM loads it offline.
+MODEL_BUCKET=${MODEL_BUCKET:-gs://models_registry}      # env / Jenkins
+MODEL_GCS_URI=""                                        # "" = $MODEL_BUCKET/<folder of MODEL>; weights.gcsUri overrides
 MODEL_CACHE_PATH=${MODEL_CACHE_PATH:-/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models}  # hostPath (GKE local SSD)
 DOWNLOADER_IMAGE=${DOWNLOADER_IMAGE:-gcr.io/google.com/cloudsdktool/google-cloud-cli:slim}
 SMOKE_IMAGE=${SMOKE_IMAGE:-docker.io/curlimages/curl:8.11.1}
@@ -50,7 +52,7 @@ SMOKE_IMAGE=${SMOKE_IMAGE:-docker.io/curlimages/curl:8.11.1}
 # $IMAGE_REGISTRY/<source host>/<path>@<digest>, digests from .cache/images.lock (written by bundle.sh).
 IMAGE_REGISTRY=${IMAGE_REGISTRY:-}                      # e.g. us-docker.pkg.dev/my-proj/llm-d
 DRAFT_MODEL=""                                          # HF id of a draft / EAGLE model for speculative decoding
-DRAFT_GCS_URI=""                                        # "" = $MODEL_BUCKET/$DRAFT_MODEL
+DRAFT_GCS_URI=""                                        # "" = $MODEL_BUCKET/<folder of DRAFT_MODEL>
 SPEC_CONFIG='{"num_speculative_tokens": 5}'             # vLLM --speculative-config; "model" is filled from DRAFT_MODEL
 MS_ARGS_JSON='[]'; MS_TP=""; MS_REPLICAS=""                # modelserver.args / tensorParallel / replicas
 
@@ -227,7 +229,7 @@ fi
 
 # ---- extra vLLM args: modelserver.args + draft-model speculative decoding ------------
 # Speculative decoding: a separate draft model (draft_model / EAGLE heads; an HF id like MODEL,
-# from Hugging Face or from the same GCS bucket when MODEL_BUCKET is set), or a method with a
+# from the same GCS bucket as the model), or a method with a
 # built-in drafter (speculativeConfig.method: mtp / ngram) when the profile sets only that.
 if [[ -n $DRAFT_MODEL || $SPEC_SET == true ]]; then
   ! vllm_cmds | grep -qE 'speculative[-_]config' ||
@@ -258,11 +260,12 @@ fi
 # (hub/models--<org>--<name>/snapshots/<rev>), so every overlay keeps passing HF ids unchanged
 # (in args or inside its bash script) and vLLM resolves them offline from local disk.
 # hostPath + flock + marker: one download per node, shared by every pod/rank on it, survives restarts.
-MODEL_GCS_URI=${MODEL_GCS_URI:-${MODEL_BUCKET:+${MODEL_BUCKET%/}/$MODEL}}
-DRAFT_GCS_URI=${DRAFT_GCS_URI:-${DRAFT_MODEL:+${MODEL_BUCKET:+${MODEL_BUCKET%/}/$DRAFT_MODEL}}}
-if [[ -n $MODEL_GCS_URI ]]; then
-  [[ -z $DRAFT_MODEL || -n $DRAFT_GCS_URI ]] || die "DRAFT_MODEL set but no MODEL_BUCKET / DRAFT_GCS_URI to fetch it from"
-  for u in $MODEL_GCS_URI $DRAFT_GCS_URI; do [[ $u == gs://* ]] || die "GCS URI must be gs://..., got $u"; done
+# garuda's folder name for an HF id: google/gemma-4-31B-it -> google__gemma_4_31b_it
+gcs_folder() { tr '[:upper:]' '[:lower:]' <<<"$1" | sed -E 's#/#__#; s/[^a-z0-9_]+/_/g'; }
+MODEL_GCS_URI=${MODEL_GCS_URI:-${MODEL_BUCKET%/}/$(gcs_folder "$MODEL")}
+DRAFT_GCS_URI=${DRAFT_GCS_URI:-${DRAFT_MODEL:+${MODEL_BUCKET%/}/$(gcs_folder "$DRAFT_MODEL")}}
+{
+  for u in $MODEL_GCS_URI $DRAFT_GCS_URI; do [[ $u == gs://?* ]] || die "weights URI must be gs://..., got '$u' (MODEL_BUCKET / weights.gcsUri)"; done
   # one "<hf-cache-repo-dir> <gs-uri>" line per model
   MODELS="models--${MODEL//\//--} $MODEL_GCS_URI"
   [[ -z $DRAFT_MODEL ]] || MODELS+=$'\n'"models--${DRAFT_MODEL//\//--} $DRAFT_GCS_URI"
@@ -276,6 +279,7 @@ while read -r REPO SRC; do
     flock 9                                        # pods on the same node wait for one download
     if [ ! -f "$D/.complete-$REV" ]; then
       echo "fetching $SRC"; gcloud storage rsync --recursive "${SRC%/}" "$D/snapshots/$REV"
+      [ -f "$D/snapshots/$REV/config.json" ] || { echo "ERROR: no config.json at the top of $SRC (expected the model repo files there)"; exit 1; }
       touch "$D/.complete-$REV"
     fi
     printf %s "$REV" > "$D/refs/main"
@@ -302,8 +306,7 @@ EOF'
       )
     )
   " "$BUILD/modelserver.yaml"
-fi
-grep -q 'llm-d-hf-token' "$BUILD/modelserver.yaml" && NEEDS_HF_SECRET=1 || NEEDS_HF_SECRET=""
+}
 # values files carry a guide label in the pool selector; pin it to what the pods carry (helm can't null a subchart default)
 POOL_GUIDE=$(yq -N "select($WORKLOADS) | .metadata.labels.\"llm-d.ai/guide\"" "$BUILD/modelserver.yaml" | grep -v '^null$' | sort -u)
 [[ $(wc -l <<<"$POOL_GUIDE") -eq 1 && -n $POOL_GUIDE ]] || die "expected one llm-d.ai/guide label on workloads, got: $POOL_GUIDE"
@@ -402,15 +405,6 @@ if [[ $ROUTER_MODE == gateway ]]; then
 fi
 
 # ---- 5. apply ------------------------------------------------------------------
-if [[ -z $NEEDS_HF_SECRET ]]; then
-  :   # weights come from GCS; no Hugging Face token needed
-elif [[ -n ${HF_TOKEN:-} ]]; then
-  # token via stdin, not argv (argv is visible in ps / process listings)
-  printf %s "$HF_TOKEN" | kubectl create secret generic llm-d-hf-token --from-file=HF_TOKEN=/dev/stdin -n "$NAMESPACE" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-else
-  kubectl get secret llm-d-hf-token -n "$NAMESPACE" >/dev/null 2>&1 || die "export HF_TOKEN or create secret llm-d-hf-token in $NAMESPACE"
-fi
 # The chart has no hooks or lookups, so its render is exactly what helm would install: apply the
 # reviewed/archived manifest itself (same as the model servers) instead of re-rendering in helm.
 log "applying router"
