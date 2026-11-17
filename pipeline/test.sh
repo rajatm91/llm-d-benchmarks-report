@@ -87,4 +87,14 @@ role() { yq -N "select(.kind==\"DisaggregatedSet\") | .spec.roles[] | select(.na
 [[ $(role prefill '.volumes | length') == $(role decode '.volumes | length') ]] || fail pd-tiered "prefill lost volumes during merge"
 W=.build/$(./deploy.sh profiles/wide-ep-gke.yaml --name)/router.yaml
 [[ $(yq -N 'select(.kind=="InferencePool") | .spec.targetPorts | length' "$W") == 8 ]] || fail wide-ep "pool must target all 8 DP rank ports"
+# air-gapped mode (needs .cache/images.lock from ./bundle.sh): every image -> registry, pinned by digest
+if [[ -f .cache/images.lock ]]; then
+  for p in profiles/*.yaml; do
+    n=$(./deploy.sh "$p" --name)
+    IMAGE_REGISTRY=registry.test/llm-d ./deploy.sh "$p" --dry-run >/dev/null 2>&1 || fail "$n" "air-gapped render failed (image missing from .cache/images.lock? re-run ./bundle.sh)"
+    bad=$(yq -N '.. | select(tag == "!!map" and has("image")) | .image' ".build/$n/modelserver.yaml" ".build/$n/router.yaml" | grep -v '^registry\.test/llm-d/.*@sha256:[0-9a-f]\{64\}$' || true)
+    [[ -z $bad ]] || fail "$n" "images not mirrored/pinned: $(echo $bad)"
+  done
+  echo "ok  air-gapped image rewrite for all profiles"
+fi
 echo "all checks passed"
