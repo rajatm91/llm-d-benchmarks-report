@@ -48,8 +48,8 @@ MODEL_GCS_URI=""                                        # "" = $MODEL_BUCKET/<fo
 MODEL_CACHE_PATH=${MODEL_CACHE_PATH:-/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models}  # hostPath (GKE local SSD)
 DOWNLOADER_IMAGE=${DOWNLOADER_IMAGE:-gcr.io/google.com/cloudsdktool/google-cloud-cli:slim}
 SMOKE_IMAGE=${SMOKE_IMAGE:-docker.io/curlimages/curl:8.11.1}
-# Air-gapped: every image (model servers, router, init, smoke test) is rewritten to
-# $IMAGE_REGISTRY/<source host>/<path>@<digest>, digests from .cache/images.lock (written by bundle.sh).
+# Air-gapped: every image (model servers, router, init, smoke test) is rewritten into your registry:
+# IMAGE_REGISTRY + IMAGE_TEMPLATE (default {registry}/{host}/{path}@{digest}; see lib/images.sh).
 IMAGE_REGISTRY=${IMAGE_REGISTRY:-}                      # e.g. us-docker.pkg.dev/my-proj/llm-d
 DRAFT_MODEL=""                                          # HF id of a draft / EAGLE model for speculative decoding
 DRAFT_GCS_URI=""                                        # "" = $MODEL_BUCKET/<folder of DRAFT_MODEL>
@@ -356,14 +356,14 @@ helm template "$NAME" "$CHART_DIR" "${HELM_ARGS[@]}" > "$BUILD/router.yaml"
 NAME=$NAME yq -i '.metadata.labels."llm-d.ai/deployment" = strenv(NAME)' "$BUILD/router.yaml"
 
 # ---- image rewrite (air-gapped) ---------------------------------------------------
-# docker.io/vllm/vllm-openai:v0.31.0 -> $IMAGE_REGISTRY/docker.io/vllm/vllm-openai@sha256:...
-norm_image() { local i=$1 h=${1%%/*}; [[ $i == */* && ( $h == *.* || $h == *:* || $h == localhost ) ]] || { [[ $i == */* ]] && i=docker.io/$i || i=docker.io/library/$i; }; echo "$i"; }
+# Each image -> $IMAGE_REGISTRY per IMAGE_TEMPLATE (lib/images.sh); digests from .cache/images.lock.
+# shellcheck source=lib/images.sh
+source "$ROOT/lib/images.sh"
 mirror_image() {
   local src; src=$(norm_image "$1")
   local dig; dig=$(awk -v s="$src" '$1 == s { print $2 }' "$ROOT/.cache/images.lock" 2>/dev/null)
   [[ -n $dig ]] || die "image $src is not in .cache/images.lock; re-run ./bundle.sh (with this profile) on a connected machine"
-  local repo=${src%@*}; [[ ${repo##*/} == *:* ]] && repo=${repo%:*}
-  echo "$IMAGE_REGISTRY/$repo@$dig"
+  image_target "$src" "$dig"
 }
 if [[ -n $IMAGE_REGISTRY ]]; then
   IMAGE_REGISTRY=${IMAGE_REGISTRY%/}

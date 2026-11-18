@@ -6,6 +6,7 @@ Every profile YAML in this guide renders with the pipeline as written. `docs/che
 
 | Step | Who | How often |
 | --- | --- | --- |
+| [0.1 The workflow, and where each setting lives](#01-the-workflow-and-where-each-setting-lives) | everyone | read once |
 | [1. One-time cluster setup](#1-one-time-cluster-setup) | cluster admin | once per cluster |
 | [2. Prepare artifacts](#2-prepare-artifacts-connected-machine) | platform team | once per llm-d version, and for each new model |
 | [3. Write a profile](#3-write-a-profile) | model owner | once per model deployment |
@@ -40,6 +41,45 @@ Each deployment has two halves:
 A **profile** (`profiles/<name>.yaml`) picks one overlay and its router values, sets the model, and names the Gateway. `deploy.sh` renders both halves, rewrites them for a shared namespace, GCS weights and a private registry, applies them, waits, and smoke-tests through the Gateway.
 
 Every resource is named `<model>-<strategy>-<engine>`, for example `qwen3-8-27b-baseline-vllm`.
+
+---
+
+## 0.1 The workflow, and where each setting lives
+
+Three machines (or roles) are involved. None of them needs everything:
+
+| Step | Runs on | Needs access to | Command |
+| --- | --- | --- | --- |
+| A. Write or adjust a profile | anywhere | this repo | edit `profiles/<name>.yaml` |
+| B. Bundle | **connected machine** | internet (GitHub, ghcr.io, docker.io, quay.io, gcr.io) | `./bundle.sh profiles/<name>.yaml` |
+| C. Mirror images | **your mirroring host** | internet + push to GAR | copy every row of `dist/images-to-mirror.tsv` |
+| D. Carry the bundle | — | — | move `dist/llm-d-bundle-*.tar.gz` inside, unpack into `pipeline/` |
+| E. Deploy | **deploy machine** (workstation or Jenkins agent) | the cluster API only | `./deploy.sh profiles/<name>.yaml` |
+
+The cluster's nodes pull the images from GAR and the weights from `gs://models_registry` themselves. The deploy machine needs neither.
+
+**Where each setting lives.** The profile describes *the model*. Environment variables describe *where it goes*. One profile can then be deployed to staging and prod unchanged.
+
+| Setting | Set in | Used by | Default |
+| --- | --- | --- | --- |
+| model, strategy, size, vLLM image, llm-d version, Gateway | profile YAML | bundle, deploy | — |
+| **cluster** | kubectl context: `KUBECONFIG` / `kubectl config use-context` | deploy | current context |
+| **namespace** | `NAMESPACE` | deploy | `llm-d` |
+| ServiceAccount | `SERVICE_ACCOUNT` | deploy | `llm-d-modelserver` |
+| **GAR repository** | `IMAGE_REGISTRY`, e.g. `us-docker.pkg.dev/<project>/<repo>` | bundle (mirror list), deploy (rewrite) | unset = public registries |
+| **image layout in GAR** | `IMAGE_TEMPLATE`, e.g. `{registry}/{path}:{tag}` | bundle (mirror list), deploy (rewrite) | `{registry}/{host}/{path}@{digest}` |
+| weights bucket | `MODEL_BUCKET` | deploy | `gs://models_registry` |
+| node-local weight cache | `MODEL_CACHE_PATH` | deploy | `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models` |
+| fetch-model image | `DOWNLOADER_IMAGE` | bundle, deploy | `gcr.io/google.com/cloudsdktool/google-cloud-cli:slim` |
+
+Keep the environment variables in one file per environment, [`envs/example.env`](../envs/example.env), and load it before running the scripts:
+
+```bash
+cp envs/example.env envs/prod.env        # edit: KUBECONFIG, NAMESPACE, IMAGE_REGISTRY, IMAGE_TEMPLATE, ...
+set -a; source envs/prod.env; set +a
+```
+
+> `IMAGE_REGISTRY` and `IMAGE_TEMPLATE` must have the **same values** when you run `bundle.sh` (which writes the mirror list) and `deploy.sh` (which rewrites the manifests). Otherwise the pods reference images that were mirrored somewhere else (`ImagePullBackOff`).
 
 ---
 
@@ -174,24 +214,63 @@ For agentgateway or Istio, set `provider.name` accordingly. The mappings are cre
 
 ## 2. Prepare artifacts (connected machine)
 
-Run this once per llm-d version, and again whenever a profile needs a new image:
+Run this once per llm-d version, and again whenever a profile needs an image that isn't bundled yet:
 
 ```bash
 cd pipeline
-IMAGE_REGISTRY=us-docker.pkg.dev/<project>/llm-d \
-./bundle.sh                                  # or only some: ./bundle.sh profiles/qwen3.8-27b-baseline-agentgateway.yaml
+set -a; source envs/prod.env; set +a        # IMAGE_REGISTRY + IMAGE_TEMPLATE fill the mirror list's targets
+./bundle.sh profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml     # or no arguments: every profile
 ```
+
+`bundle.sh` **does not push anything** by default. It needs internet access, but no access to GAR, GCS or the cluster.
 
 | It produces | Used for |
 | --- | --- |
 | `.cache/llm-d-<sha>/` | the pinned llm-d guides (overlays, router values) |
 | `.cache/charts/<chart>-<version>/` | the router Helm chart |
 | `.cache/crds/` | InferencePool CRDs ([1.2](#12-gateway-api-and-inferencepool-crds)) |
-| `.cache/images.lock` | every image, pinned to a digest |
-| images in `IMAGE_REGISTRY/<host>/<path>` | the cluster pulls from here |
-| `dist/llm-d-bundle-<sha>-<date>.tar.gz` | everything above except images; carry it into the air gap |
+| `.cache/images.lock` | every image the profiles use, pinned to a digest |
+| `dist/images-to-mirror.tsv` | **what to copy into GAR**: `repo@digest <tab> target <tab> original repo:tag` for every locked image |
+| `dist/llm-d-bundle-<sha>-<date>.tar.gz` | this directory including `.cache/`; carry it into the air gap |
 
-**Model weights are not part of this step.** The garuda repo downloads them and stores them in GCS. This pipeline only reads them, from one folder per model:
+### 2.1 Mirror the images into GAR
+
+With your own tooling, copy each row of the mirror list. Example rows with `IMAGE_TEMPLATE='{registry}/{path}:{tag}'`:
+
+```
+SOURCE (copy from)                                       TARGET (copy to)                                                      ORIGINAL
+docker.io/vllm/vllm-openai@sha256:20fdb0…                us-docker.pkg.dev/my-project/llm-d/vllm/vllm-openai:v0.34.0           docker.io/vllm/vllm-openai:v0.34.0
+ghcr.io/llm-d/llm-d-router-endpoint-picker@sha256:0241…  us-docker.pkg.dev/my-project/llm-d/llm-d/llm-d-router-endpoint-picker:v1.0.0  ghcr.io/llm-d/llm-d-router-endpoint-picker:v1.0.0
+gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:… us-docker.pkg.dev/my-project/llm-d/google.com/cloudsdktool/google-cloud-cli:slim  gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
+```
+
+For example, with `gcrane`, which copies all architectures and keeps the digest:
+
+```bash
+gcloud auth configure-docker us-docker.pkg.dev
+tail -n +2 dist/images-to-mirror.tsv | while IFS=$'\t' read -r src dst _; do gcrane cp "$src" "$dst"; done
+# skopeo:  skopeo copy --all "docker://$src" "docker://$dst"
+```
+
+Copy from the `SOURCE` column (`repo@digest`), not from the original tag. Tags like `:main` or `:slim` keep moving, and the digest is what `bundle.sh` locked.
+
+### 2.2 Choose the layout (`IMAGE_TEMPLATE`)
+
+The template says where each source image lives in your registry. `bundle.sh` uses it for the mirror list, and `deploy.sh` uses the same template (through `lib/images.sh`) to rewrite the manifests. The two always agree.
+
+| `IMAGE_TEMPLATE` | `docker.io/vllm/vllm-openai:v0.34.0` becomes | Use when |
+| --- | --- | --- |
+| `{registry}/{host}/{path}@{digest}` (default) | `<registry>/docker.io/vllm/vllm-openai@sha256:…` | your copy keeps digests (`gcrane`/`crane cp`, `skopeo copy --all`); most reproducible |
+| `{registry}/{path}:{tag}` | `<registry>/vllm/vllm-openai:v0.34.0` | you copy by tag, or with `docker pull` + `docker push` (which changes multi-arch digests) |
+| `{registry}/{name}:{tag}` | `<registry>/vllm-openai:v0.34.0` | flat repository; `bundle.sh` stops if two images would collide |
+
+Placeholders: `{registry}`, `{host}`, `{path}`, `{name}` (last path segment), `{tag}`, `{digest}`.
+
+If the bundle machine *can* push to GAR, `PUSH_IMAGES=1 ./bundle.sh ...` copies the images itself, using `crane`, `gcrane`, `skopeo` or `docker buildx`.
+
+### 2.3 Model weights
+
+Model weights are **not** part of the bundle. The garuda repo downloads them and stores them in GCS. This pipeline only reads them, from one folder per model:
 
 ```
 gs://models_registry/<folder>/     model repo files at the top (config.json, *.safetensors, tokenizer, ...)
@@ -537,14 +616,20 @@ less .build/qwen3-8-27b-baseline-vllm/{modelserver,router}.yaml        # exactly
 
 ## 5. Deploy
 
+On the deploy machine, inside the air gap:
+
 ```bash
+tar -xzf llm-d-bundle-<sha>-<date>.tar.gz -C pipeline    # brings .cache/ (guides, chart, CRDs, images.lock)
 cd pipeline
-export NAMESPACE=llm-d                                   # defaults shown
-export SERVICE_ACCOUNT=llm-d-modelserver
-export MODEL_BUCKET=gs://models_registry               # where garuda stores the weights
-export IMAGE_REGISTRY=us-docker.pkg.dev/<project>/llm-d  # unset = public registries
-./deploy.sh profiles/qwen3.8-27b-baseline-agentgateway.yaml
+set -a; source envs/prod.env; set +a                    # cluster, namespace, GAR, layout, bucket
+kubectl config current-context                          # deploy.sh targets whatever this prints
+kubectl get ns "$NAMESPACE" && kubectl get sa "$SERVICE_ACCOUNT" -n "$NAMESPACE"
+
+./deploy.sh profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml --dry-run   # review .build/<name>/
+./deploy.sh profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml
 ```
+
+`deploy.sh` has no cluster setting of its own. It uses kubectl's current context, so check it every time, or give each environment its own `KUBECONFIG` file holding only that cluster, as `envs/example.env` does. In Jenkins, the per-cluster kubeconfig credential does the same ([8](#8-run-it-from-jenkins)).
 
 What happens:
 1. **Render.** The model servers come from the overlay, the router from the cached chart. Then the pipeline renames resources, labels pods, adds the fetch step, swaps the model, sets args and pins images.
@@ -582,9 +667,9 @@ Clients always send the **Hugging Face model id**, even though the weights come 
 | --- | --- |
 | Change flags, replicas or TP | Edit the profile, then `./deploy.sh <profile>` (`--dry-run` first). |
 | New weights for the same model | Have garuda store them in a **new folder**, set `weights.gcsUri` to it, and redeploy. Nodes cache by path, so new files under the same path are not re-downloaded. |
-| Add a model | Make sure garuda has stored it in `gs://models_registry/<folder>/`, write a profile, run `./bundle.sh profiles/<new>.yaml` on the connected side if it needs new images, then deploy. |
+| Add a model | Make sure garuda has stored it in `gs://models_registry/<folder>/`, write a profile, run `./bundle.sh profiles/<new>.yaml` on the connected side and mirror any new rows of `images-to-mirror.tsv`, then deploy. |
 | Remove a deployment | `./deploy.sh <profile> --delete`. This removes exactly the rendered model-server and router objects. The ServiceAccount, namespace and Gateway stay. |
-| Upgrade vLLM for one model | Set `modelserver.image` (tag or digest), run `./bundle.sh profiles/<it>.yaml` on the connected side, then deploy. Only that model's vLLM containers change. |
+| Upgrade vLLM for one model | Set `modelserver.image` (tag or digest), run `./bundle.sh profiles/<it>.yaml` on the connected side, mirror the new row of `images-to-mirror.tsv`, then deploy. Only that model's vLLM containers change. |
 | Upgrade llm-d | Change `llmdRef` (or `LLMD_REF`), run `./test.sh`, and re-run `./bundle.sh`. If upstream moved or reordered something, the render fails before anything reaches a cluster. |
 | Free node disk | Delete old model folders under `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models/hub/` on the node. The cache is never evicted automatically. |
 
@@ -608,6 +693,7 @@ pipeline {
   environment {
     NAMESPACE      = 'llm-d'
     IMAGE_REGISTRY = 'us-docker.pkg.dev/<project>/llm-d'
+    IMAGE_TEMPLATE = '{registry}/{path}:{tag}'   // same as when bundle.sh wrote the mirror list
     MODEL_BUCKET   = 'gs://models_registry'
   }
   options { timeout(time: 3, unit: 'HOURS') }
@@ -653,7 +739,7 @@ pipeline {
 | Pod stuck in `Init:0/1`, the `fetch-model` log shows 403 | The ServiceAccount can't read the bucket. Check the Workload Identity binding ([1.5](#15-shared-namespace-serviceaccount-and-access-to-the-weights-bucket)) and Private Google Access. |
 | `fetch-model`: `no config.json at the top of gs://...` | The folder name or layout doesn't match. Check `gcloud storage ls gs://models_registry/<folder>/`; if garuda used another name, set `weights.gcsUri` in the profile. |
 | `fetch-model` log shows "fetching" for a long time | Expected on a node's first download (hundreds of GB). Other pods on the node wait on its lock. Later starts skip it. |
-| `ImagePullBackOff` | The node SA lacks `artifactregistry.reader`, or the image wasn't mirrored. Re-run `bundle.sh` with `IMAGE_REGISTRY`. |
+| `ImagePullBackOff` | Either the node SA lacks `artifactregistry.reader`, or the image isn't at the path the pod references. Compare `kubectl describe pod` with `dist/images-to-mirror.tsv`. Check that `IMAGE_REGISTRY` and `IMAGE_TEMPLATE` were the same for `bundle.sh` and `deploy.sh`, and that every row was copied. |
 | `image ... is not in .cache/images.lock` | The profile uses an image the bundle doesn't have. Run `./bundle.sh profiles/<it>.yaml` on the connected side. |
 | `cannot fetch llm-d` / `cannot pull ...chart` | No network and no `.cache/`. Unpack the bundle into `pipeline/`. |
 | `derived name ... at most 40 chars` | Set `modelAlias` (for example `llama33-70b`). |
@@ -676,6 +762,8 @@ pipeline {
 | `NAMESPACE` | `llm-d` | shared namespace |
 | `SERVICE_ACCOUNT` | `llm-d-modelserver` | pre-existing; model-server pods run as it |
 | `MODEL_BUCKET` | `gs://models_registry` | bucket where garuda stores the weights |
-| `IMAGE_REGISTRY` | (unset) | private registry; needs `.cache/images.lock` |
+| `IMAGE_REGISTRY` | (unset) | your GAR repository; needs `.cache/images.lock` |
+| `IMAGE_TEMPLATE` | `{registry}/{host}/{path}@{digest}` | image layout in `IMAGE_REGISTRY` (see [2.2](#22-choose-the-layout-image_template)) |
+| `PUSH_IMAGES` | (unset) | `bundle.sh` only: `1` = copy the images itself instead of only listing them |
 | `MODEL_CACHE_PATH` | `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models` | node-local weight cache |
 | `DOWNLOADER_IMAGE` | `gcr.io/google.com/cloudsdktool/google-cloud-cli:slim` | `fetch-model` image (mirrored by `bundle.sh`) |

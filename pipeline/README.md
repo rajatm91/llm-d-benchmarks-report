@@ -41,24 +41,29 @@ The router chart always creates its own EPP ServiceAccount (`NAME-epp`) and RBAC
 
 ## 0a. Air-gapped deploy: `bundle.sh`
 
-On a machine **with** internet access:
+On a machine **with** internet access (it needs no access to GAR, GCS or the cluster):
 ```bash
-IMAGE_REGISTRY=us-docker.pkg.dev/<proj>/llm-d \
-./bundle.sh                      # or: ./bundle.sh profiles/a.yaml profiles/b.yaml
+set -a; source envs/prod.env; set +a   # IMAGE_REGISTRY + IMAGE_TEMPLATE: where images will live in GAR
+./bundle.sh                            # or: ./bundle.sh profiles/a.yaml profiles/b.yaml
 ```
 1. **Renders every profile.** This fills `.cache/` (the pinned llm-d guides, the router chart under `.cache/charts/`, the InferencePool CRDs under `.cache/crds/`) and `.build/`.
 2. **Locks image digests.** Every image the renders use, plus the smoke-test image, is resolved to a digest in `.cache/images.lock`. Moving tags like `:main`, `:nightly` and `:latest` are frozen there.
-3. **Mirrors images** to `IMAGE_REGISTRY/<source host>/<path>` with crane, gcrane, skopeo or `docker buildx imagetools`. The copy is multi-arch and digest-preserving.
-4. **Packs** this directory, including `.cache/`, into `dist/llm-d-bundle-<llmd sha>-<date>.tar.gz` (about 8 MB).
+3. **Writes the mirror list** `dist/images-to-mirror.tsv`: `repo@digest <tab> target in your registry <tab> original` per image. Copy the images into GAR yourself, from the first column to the second. With `PUSH_IMAGES=1`, `bundle.sh` copies them itself (crane, gcrane, skopeo or `docker buildx`).
+4. **Packs** this directory, including `.cache/`, into `dist/llm-d-bundle-<llmd sha>-<date>.tar.gz`.
 
-Without `IMAGE_REGISTRY`, step 3 is skipped (mirror with your own tooling, using the paths above). Model weights are not part of the bundle; see [0b](#0b-model-weights-from-gcs).
+`IMAGE_TEMPLATE` sets the layout in your registry (`lib/images.sh`). For `docker.io/vllm/vllm-openai:v0.34.0`:
+- `{registry}/{host}/{path}@{digest}` (default) → `<registry>/docker.io/vllm/vllm-openai@sha256:…`
+- `{registry}/{path}:{tag}` → `<registry>/vllm/vllm-openai:v0.34.0`
+- `{registry}/{name}:{tag}` → `<registry>/vllm-openai:v0.34.0`
+
+Keep `{digest}` only if your copy preserves digests. `bundle.sh` and `deploy.sh` must get the same `IMAGE_REGISTRY` and `IMAGE_TEMPLATE`; [`envs/example.env`](envs/example.env) keeps them in one place. Model weights are not part of the bundle; see [0b](#0b-model-weights-from-gcs).
 
 Inside the air gap, unpack the tarball and deploy as usual:
 ```bash
-export IMAGE_REGISTRY=us-docker.pkg.dev/<proj>/llm-d
+set -a; source envs/prod.env; set +a   # cluster (KUBECONFIG), NAMESPACE, IMAGE_REGISTRY, IMAGE_TEMPLATE, MODEL_BUCKET
 ./deploy.sh profiles/<name>.yaml
 ```
-`deploy.sh` needs no network. It reads the guides and chart from `.cache/` and rewrites every image to `$IMAGE_REGISTRY/...@sha256:<digest>`. An image that is not in `images.lock` fails the render. A new profile or an `llmdRef` bump means re-running `bundle.sh` (with just the new profiles is fine; the lock is merged). `./test.sh` checks the air-gapped rewrite for every profile whenever `images.lock` exists.
+`deploy.sh` needs no network. It reads the guides and chart from `.cache/` and rewrites every image into `IMAGE_REGISTRY` per `IMAGE_TEMPLATE`. An image that is not in `images.lock` fails the render. A new profile or an `llmdRef` bump means re-running `bundle.sh` (with just the new profiles is fine; the lock is merged). `./test.sh` checks the air-gapped rewrite for every profile whenever `images.lock` exists.
 
 The router is applied from the rendered manifest (`kubectl apply --server-side`), like the model servers. The chart has no hooks or lookups, so this is what `helm install` would create, and it is exactly the manifest that `--dry-run` and Jenkins archive. All router objects carry `llm-d.ai/deployment=<name>`. Removing resources that disappeared between chart versions is not automatic: run `--delete` with the old render first.
 
