@@ -1,0 +1,18 @@
+# Make an upstream render safe to share one namespace with other models.
+# env: NAME SA STRATEGY ENGINE MODEL_SLUG, MULTI=true when the render has several workloads
+select(.kind != "ServiceAccount") |
+# workloads -> NAME (one workload) or NAME-<role> (e.g. prefill + decode)
+(select(@WORKLOADS@) | .metadata.name) = (
+  if strenv(MULTI) == "true"
+  then strenv(NAME) + "-" + (.metadata.labels."llm-d.ai/role" // .metadata.name)
+  else strenv(NAME)
+  end) |
+# everything else -> NAME-<upstream name>
+(select((@WORKLOADS@) | not) | .metadata.name) |= strenv(NAME) + "-" + . |
+(.. | select(tag == "!!map" and has("serviceAccountName")) | .serviceAccountName) = strenv(SA) |
+(.. | select(tag == "!!map" and has("resourceClaimTemplateName")) | .resourceClaimTemplateName) |= strenv(NAME) + "-" + . |
+# labels on workloads and their pod templates; the InferencePool selects llm-d.ai/deployment
+(@LABELS@) |= (. // {}) * {"llm-d.ai/deployment": strenv(NAME), "llm-d.ai/strategy": strenv(STRATEGY)} |
+(@LABELS@ | ."llm-d.ai/model") |= (. // strenv(MODEL_SLUG)) |
+(@LABELS@ | ."llm-d.ai/engine-type") |= (. // strenv(ENGINE)) |
+(select(.kind == "Deployment") | .spec.selector.matchLabels."llm-d.ai/deployment") = strenv(NAME)

@@ -246,14 +246,6 @@ ghcr.io/llm-d/llm-d-router-endpoint-picker@sha256:0241…  us-docker.pkg.dev/my-
 gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:… us-docker.pkg.dev/my-project/llm-d/google.com/cloudsdktool/google-cloud-cli:slim  gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
 ```
 
-For example, with `gcrane`, which copies all architectures and keeps the digest:
-
-```bash
-gcloud auth configure-docker us-docker.pkg.dev
-tail -n +2 dist/images-to-mirror.tsv | while IFS=$'\t' read -r src dst _; do gcrane cp "$src" "$dst"; done
-# skopeo:  skopeo copy --all "docker://$src" "docker://$dst"
-```
-
 Copy from the `SOURCE` column (`repo@digest`), not from the original tag. Tags like `:main` or `:slim` keep moving, and the digest is what `bundle.sh` locked.
 
 ### 2.2 Choose the layout (`IMAGE_TEMPLATE`)
@@ -262,13 +254,13 @@ The template says where each source image lives in your registry. `bundle.sh` us
 
 | `IMAGE_TEMPLATE` | `docker.io/vllm/vllm-openai:v0.34.0` becomes | Use when |
 | --- | --- | --- |
-| `{registry}/{host}/{path}@{digest}` (default) | `<registry>/docker.io/vllm/vllm-openai@sha256:…` | your copy keeps digests (`gcrane`/`crane cp`, `skopeo copy --all`); most reproducible |
+| `{registry}/{host}/{path}@{digest}` (default) | `<registry>/docker.io/vllm/vllm-openai@sha256:…` | your copy keeps digests (all architectures copied as-is); most reproducible |
 | `{registry}/{path}:{tag}` | `<registry>/vllm/vllm-openai:v0.34.0` | you copy by tag, or with `docker pull` + `docker push` (which changes multi-arch digests) |
 | `{registry}/{name}:{tag}` | `<registry>/vllm-openai:v0.34.0` | flat repository; `bundle.sh` stops if two images would collide |
 
 Placeholders: `{registry}`, `{host}`, `{path}`, `{name}` (last path segment), `{tag}`, `{digest}`.
 
-If the bundle machine *can* push to GAR, `PUSH_IMAGES=1 ./bundle.sh ...` copies the images itself, using `crane`, `gcrane`, `skopeo` or `docker buildx`.
+`bundle.sh` never copies images; copying them into GAR is up to your own tooling.
 
 ### 2.3 Model weights
 
@@ -755,7 +747,7 @@ pipeline {
 
 ## Appendix: reference
 
-**Profile keys:** `model`, `strategy`, `modelAlias`, `engine`, `nameTemplate`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas, image}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel}`, `weights.{gcsUri, draftGcsUri}`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
+**Profile keys:** `model`, `strategy`, `modelAlias`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas, image}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel}`, `weights.gcsUri`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
 
 **Environment** (the same for every model, set by Jenkins):
 
@@ -766,6 +758,5 @@ pipeline {
 | `MODEL_BUCKET` | `gs://models_registry` | bucket where garuda stores the weights |
 | `IMAGE_REGISTRY` | (unset) | your GAR repository; needs `.cache/images.lock` |
 | `IMAGE_TEMPLATE` | `{registry}/{host}/{path}@{digest}` | image layout in `IMAGE_REGISTRY` (see [2.2](#22-choose-the-layout-image_template)) |
-| `PUSH_IMAGES` | (unset) | `bundle.sh` only: `1` = copy the images itself instead of only listing them |
 | `MODEL_CACHE_PATH` | `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models` | node-local weight cache |
 | `DOWNLOADER_IMAGE` | `gcr.io/google.com/cloudsdktool/google-cloud-cli:slim` | `fetch-model` image (mirrored by `bundle.sh`) |

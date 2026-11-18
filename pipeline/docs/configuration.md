@@ -39,7 +39,6 @@ These describe the target, not the model, so they live in `envs/<env>.env` (copy
 | `SMOKE_IMAGE` | `docker.io/curlimages/curl:8.11.1` | deploy, bundle | Image of the post-deploy smoke test. |
 | `IMAGE_REGISTRY` | unset (public registries) | deploy, bundle | Your registry, e.g. `us-docker.pkg.dev/<proj>/llm-d`. Set it and every image is rewritten into it. |
 | `IMAGE_TEMPLATE` | `{registry}/{host}/{path}@{digest}` | deploy, bundle | Layout inside `IMAGE_REGISTRY`. Placeholders: `{registry} {host} {path} {name} {tag} {digest}` ([`lib/images.sh`](../lib/images.sh)). Must be the same for bundle and deploy. |
-| `PUSH_IMAGES` | unset | bundle | `1` = `bundle.sh` copies the images itself instead of only writing `dist/images-to-mirror.tsv`. |
 | `OUT` | `dist` | bundle | Where the tarball and mirror list go. |
 | `INFERENCE_CRDS_URL` | GAIE `releases/latest/.../v1-manifests.yaml` | bundle | InferencePool CRDs cached into `.cache/crds/`. |
 | `ROUTER_CRDS` | unset | bundle | `1` = also cache the llm-d-router CRDs (`InferenceObjective`, `InferenceModelRewrite`) as `.cache/crds/llm-d-router.yaml`. Needed for flow-control priorities. |
@@ -56,8 +55,8 @@ Unknown keys stop the render (typos never fall back to defaults). `./deploy.sh <
 | `model` | yes | | HF id. Clients send it as `model`; also picks the GCS folder (`google/gemma-4-31B-it` → `google__gemma_4_31b_it`). |
 | `strategy` | yes | | Free-text tag in the name, e.g. `baseline`, `pd`, `flowctl`. |
 | `modelAlias` | | last part of `model` | Shorter slug when the name would go over 40 characters. |
-| `engine` | | from the overlay path (`vllm`/`sglang`/`trtllm`) | Set only if the path doesn't contain the engine. |
-| `nameTemplate` | | `{model}-{strategy}-{engine}` | Every resource is named from this. Must be a DNS label, at most 40 characters. |
+
+Every resource is named `<model>-<strategy>-<engine>` (engine from the overlay path: `/vllm/`, `/sglang/` or `/trtllm/`). The name must be a DNS label of at most 40 characters.
 | `llmdRef` | | pipeline's `LLMD_REF` | llm-d commit whose `guides/` are used. Pin a release tag's commit for reproducible deploys. |
 | `waitTimeout` | | `60m` | How long to wait for pods to be ready. |
 
@@ -85,7 +84,6 @@ Unknown keys stop the render (typos never fall back to defaults). `./deploy.sh <
 | Field | Default | Notes |
 | --- | --- | --- |
 | `gcsUri` | `$MODEL_BUCKET/<folder of model>` | Exact folder, e.g. for a new revision. Use a new folder for new weights: nodes cache by path. |
-| `draftGcsUri` | `$MODEL_BUCKET/<folder of draftModel>` | Same for the draft model. |
 
 ### `router`
 

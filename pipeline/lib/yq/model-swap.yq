@@ -1,0 +1,11 @@
+# Replace the overlay's reference model with the profile's model wherever vLLM starts, and drop
+# flags tied to the old model (parsers, chat template).
+# env: UP MODEL (ids), UP_RE/UP_REPL (id inside script-form commands), DROP_RE (flags inside
+#      script text), DROP_LIST (flags as list items), MLABEL (new llm-d.ai/model label)
+(@VLLM_POD@ | .containers[] | select(@VLLM_CTR@)) |= (
+  (.command[], .args[]) |= (sub(strenv(UP_RE), strenv(UP_REPL)) | sub(strenv(DROP_RE), "")) |
+  (.args[] | select(. == strenv(UP))) = strenv(MODEL) |
+  .args = [(.args // [])[] | select(test(strenv(DROP_LIST)) | not)] | del(.args | select(length == 0))
+) |
+(@LABELS@ | select(has("llm-d.ai/model")) | ."llm-d.ai/model") = strenv(MLABEL) |
+(select(.kind == "Deployment") | .spec.selector.matchLabels | select(has("llm-d.ai/model")) | ."llm-d.ai/model") = strenv(MLABEL)
