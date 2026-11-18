@@ -63,13 +63,8 @@ IMAGES=$( { for p in "${PROFILES[@]}"; do n=$(./deploy.sh "$p" --name)
             echo "$SMOKE_IMAGE"
           } | grep -v '^$' | while read -r i; do norm_image "$i"; done | sort -u)
 
-if command -v crane >/dev/null; then
-  digest() { crane digest "$1"; }
-elif docker buildx version >/dev/null 2>&1; then
-  digest() { docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"'; }
-else
-  die "need crane or docker buildx to resolve image digests"
-fi
+docker buildx version >/dev/null 2>&1 || die "need docker buildx to resolve image digests"
+digest() { docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"'; }
 log "resolving $(wc -l <<<"$IMAGES" | tr -d ' ') image digests"
 : > .cache/images.lock.tmp
 while read -r img; do

@@ -9,8 +9,8 @@
 #   {registry}/{host}/{path}@{digest}  -> <reg>/docker.io/vllm/vllm-openai@sha256:...   (default)
 #   {registry}/{path}:{tag}            -> <reg>/vllm/vllm-openai:v0.34.0
 #   {registry}/{name}:{tag}            -> <reg>/vllm-openai:v0.34.0
-# Keep {digest} only if your mirroring preserves digests (crane/gcrane copy, skopeo copy --all);
-# a plain `docker pull && docker push` of a multi-arch image does not.
+# Keep {digest} only if your mirroring preserves digests; a plain `docker pull && docker push`
+# of a multi-arch image does not.
 IMAGE_TEMPLATE=${IMAGE_TEMPLATE:-'{registry}/{host}/{path}@{digest}'}
 
 # docker.io short names -> fully qualified: vllm/vllm-openai:x -> docker.io/vllm/vllm-openai:x

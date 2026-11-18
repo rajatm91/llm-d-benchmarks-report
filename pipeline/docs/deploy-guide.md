@@ -246,14 +246,6 @@ ghcr.io/llm-d/llm-d-router-endpoint-picker@sha256:0241…  us-docker.pkg.dev/my-
 gcr.io/google.com/cloudsdktool/google-cloud-cli@sha256:… us-docker.pkg.dev/my-project/llm-d/google.com/cloudsdktool/google-cloud-cli:slim  gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
 ```
 
-For example, with `gcrane`, which copies all architectures and keeps the digest:
-
-```bash
-gcloud auth configure-docker us-docker.pkg.dev
-tail -n +2 dist/images-to-mirror.tsv | while IFS=$'\t' read -r src dst _; do gcrane cp "$src" "$dst"; done
-# skopeo:  skopeo copy --all "docker://$src" "docker://$dst"
-```
-
 Copy from the `SOURCE` column (`repo@digest`), not from the original tag. Tags like `:main` or `:slim` keep moving, and the digest is what `bundle.sh` locked.
 
 ### 2.2 Choose the layout (`IMAGE_TEMPLATE`)
@@ -262,13 +254,13 @@ The template says where each source image lives in your registry. `bundle.sh` us
 
 | `IMAGE_TEMPLATE` | `docker.io/vllm/vllm-openai:v0.34.0` becomes | Use when |
 | --- | --- | --- |
-| `{registry}/{host}/{path}@{digest}` (default) | `<registry>/docker.io/vllm/vllm-openai@sha256:…` | your copy keeps digests (`gcrane`/`crane cp`, `skopeo copy --all`); most reproducible |
+| `{registry}/{host}/{path}@{digest}` (default) | `<registry>/docker.io/vllm/vllm-openai@sha256:…` | your copy keeps digests (all architectures copied as-is); most reproducible |
 | `{registry}/{path}:{tag}` | `<registry>/vllm/vllm-openai:v0.34.0` | you copy by tag, or with `docker pull` + `docker push` (which changes multi-arch digests) |
 | `{registry}/{name}:{tag}` | `<registry>/vllm-openai:v0.34.0` | flat repository; `bundle.sh` stops if two images would collide |
 
 Placeholders: `{registry}`, `{host}`, `{path}`, `{name}` (last path segment), `{tag}`, `{digest}`.
 
-`bundle.sh` never pushes. If the bundle machine can push to GAR, run the copy loop above right after it.
+`bundle.sh` never copies images; copying them into GAR is up to your own tooling.
 
 ### 2.3 Model weights
 
