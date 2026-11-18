@@ -139,5 +139,25 @@ if [[ -f .cache/images.lock ]]; then
     [[ -z $bad ]] || fail "$n" "IMAGE_TEMPLATE not applied: $(echo $bad)"
   done
   echo "ok  IMAGE_TEMPLATE layout for all profiles"
+  # Artifact Registry remote repos (IMAGE_REMOTES): upstream path kept, host -> its repo, pinned by digest
+  R=asia-south1-docker.pkg.dev/p
+  remotes="docker.io=$R/dh ghcr.io=$R/gh gcr.io=$R/gc quay.io=$R/qy"
+  for p in profiles/*.yaml; do
+    n=$(./deploy.sh "$p" --name)
+    IMAGE_REMOTES=$remotes ./deploy.sh "$p" --dry-run >/dev/null 2>&1 || fail "$n" "render with IMAGE_REMOTES failed"
+    imgs=$(yq -N '.. | select(tag == "!!map" and has("image")) | .image' ".build/$n/modelserver.yaml" ".build/$n/router.yaml")
+    bad=$(grep -vE "^$R/(dh|gh|gc|qy)/[^@]+@sha256:[0-9a-f]{64}$" <<<"$imgs" || true)
+    [[ -z $bad ]] || fail "$n" "images not pulled through remote repos: $(echo $bad)"
+    ! grep -qE "^$R/(dh|gh|gc|qy)/(docker\.io|ghcr\.io|gcr\.io|quay\.io)/" <<<"$imgs" || fail "$n" "remote repo path still contains the upstream host"
+  done
+  n=$(./deploy.sh profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml --name)
+  grep -q "^ *image: $R/dh/vllm/vllm-openai@sha256:" ".build/$n/modelserver.yaml" || fail "$n" "vLLM not from the docker.io remote repo"
+  grep -q "^ *image: $R/gh/llm-d/llm-d-router-endpoint-picker@sha256:" ".build/$n/router.yaml" || fail "$n" "EPP not from the ghcr.io remote repo"
+  # mixed: hosts without a remote repo still go to IMAGE_REGISTRY; with neither, the render stops
+  IMAGE_REMOTES="ghcr.io=$R/gh" IMAGE_REGISTRY=registry.test/llm-d ./deploy.sh profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml --dry-run >/dev/null 2>&1 || fail "$n" "mixed render failed"
+  grep -q "^ *image: $R/gh/llm-d/llm-d-router-endpoint-picker@" ".build/$n/router.yaml" && grep -q '^ *image: registry.test/llm-d/docker.io/vllm/vllm-openai@' ".build/$n/modelserver.yaml" ||
+    fail "$n" "mixed IMAGE_REMOTES + IMAGE_REGISTRY not split by host"
+  ! IMAGE_REMOTES="ghcr.io=$R/gh" ./deploy.sh profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml --dry-run >/dev/null 2>&1 || fail "$n" "unmapped host without IMAGE_REGISTRY should fail"
+  echo "ok  IMAGE_REMOTES pull-through for all profiles"
 fi
 echo "all checks passed"

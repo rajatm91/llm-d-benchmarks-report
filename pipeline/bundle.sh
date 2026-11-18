@@ -8,6 +8,8 @@
 #   IMAGE_REGISTRY=us-docker.pkg.dev/<proj>/<repo>  your registry (fills the target column of the mirror list)
 #   IMAGE_TEMPLATE='{registry}/{name}:{tag}'        how images are laid out in it (see lib/images.sh); must be
 #                                                   the same value deploy.sh gets inside the air gap
+#   IMAGE_REMOTES='docker.io=<repo> ghcr.io=<repo>' Artifact Registry remote repos per upstream host: those
+#                                                   images are pulled through, so they stay off the mirror list
 #   ROUTER_CRDS=1                                   also fetch the llm-d-router CRDs (InferenceObjective,
 #                                                   InferenceModelRewrite) for flow-control priorities
 #   OUT=dist                                        where the tarball and mirror list go
@@ -43,7 +45,7 @@ eval "$(./deploy.sh "${PROFILES[0]}" --env)"
 # Images are collected from these renders; deploy.sh re-renders inside with the real settings.
 for p in "${PROFILES[@]}"; do
   log "rendering $p"
-  IMAGE_REGISTRY= ./deploy.sh "$p" --dry-run >/dev/null
+  IMAGE_REGISTRY= IMAGE_REMOTES= ./deploy.sh "$p" --dry-run >/dev/null   # upstream image names
 done
 
 mkdir -p .cache/crds
@@ -81,15 +83,18 @@ mv .cache/images.lock.new .cache/images.lock; rm -f .cache/images.lock.tmp
 mkdir -p "$OUT"
 REG_FOR_LIST=${IMAGE_REGISTRY:-<IMAGE_REGISTRY>}
 # columns: copy FROM (repo@digest: every tool accepts it, unlike repo:tag@digest) / copy TO / original reference
+# Images from hosts in IMAGE_REMOTES are pulled through Artifact Registry remote repos: nothing to copy.
 { printf 'SOURCE\tTARGET\tORIGINAL\n'
   while read -r img d; do
+    [[ -z $(image_remote "${img%%/*}") ]] || continue
     r=${img%@*}; [[ ${r##*/} == *:* ]] && r=${r%:*}
     printf '%s@%s\t%s\t%s\n' "$r" "$d" "$(IMAGE_REGISTRY=$REG_FOR_LIST image_target "$img" "$d")" "$img"
   done < .cache/images.lock
 } > "$OUT/images-to-mirror.tsv"
-dups=$(tail -n +2 "$OUT/images-to-mirror.tsv" | cut -f2 | sed 's/@.*//' | sort | uniq -d)
+# a collision is one target fed by two different sources (same image under two tags is fine)
+dups=$(tail -n +2 "$OUT/images-to-mirror.tsv" | cut -f1,2 | sort -u | cut -f2 | sort | uniq -d)
 [[ -z $dups ]] || die "IMAGE_TEMPLATE maps different images to the same target: $(echo $dups); include {path} or {host}"
-log "mirror list: $OUT/images-to-mirror.tsv ($(($(wc -l < "$OUT/images-to-mirror.tsv") - 1)) images, template $IMAGE_TEMPLATE)"
+log "mirror list: $OUT/images-to-mirror.tsv ($(($(wc -l < "$OUT/images-to-mirror.tsv") - 1)) images to copy, template $IMAGE_TEMPLATE${IMAGE_REMOTES:+; the rest pull through IMAGE_REMOTES})"
 
 # ---- 4. pack --------------------------------------------------------------------------------
 TAR=$OUT/llm-d-bundle-${LLMD_REF:0:7}-$(date +%Y%m%d).tar.gz

@@ -57,7 +57,9 @@ set -a; source envs/prod.env; set +a   # IMAGE_REGISTRY + IMAGE_TEMPLATE: where 
 - `{registry}/{path}:{tag}` → `<registry>/vllm/vllm-openai:v0.34.0`
 - `{registry}/{name}:{tag}` → `<registry>/vllm-openai:v0.34.0`
 
-Keep `{digest}` only if your copy preserves digests. `bundle.sh` and `deploy.sh` must get the same `IMAGE_REGISTRY` and `IMAGE_TEMPLATE`; [`envs/example.env`](envs/example.env) keeps them in one place. Model weights are not part of the bundle; see [0b](#0b-model-weights-from-gcs).
+Keep `{digest}` only if your copy preserves digests. `bundle.sh` and `deploy.sh` must get the same `IMAGE_REGISTRY` and `IMAGE_TEMPLATE`; [`envs/example.env`](envs/example.env) keeps them in one place.
+
+**Artifact Registry remote repos instead of copying:** with a remote (pull-through) repo per upstream host, set `IMAGE_REMOTES='docker.io=<repo> ghcr.io=<repo> gcr.io=<repo> quay.io=<repo>'`. Images from those hosts become `<repo>/<upstream path>@<digest>` (e.g. `asia-south1-docker.pkg.dev/<proj>/<docker-io-repo>/vllm/vllm-openai@sha256:…`) and are left off the mirror list. With all four hosts mapped there is nothing to copy and `IMAGE_REGISTRY` is not needed. `bundle.sh` still locks the digests, so deploys stay reproducible. Model weights are not part of the bundle; see [0b](#0b-model-weights-from-gcs).
 
 Inside the air gap, unpack the tarball and deploy as usual:
 ```bash
