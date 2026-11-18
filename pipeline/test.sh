@@ -108,6 +108,19 @@ for p in profiles/pd-gke.yaml profiles/wide-ep-pd-tiered-glm-agentgateway.yaml; 
   done < "$T/after"
 done
 echo "ok  modelserver.image overrides only vLLM containers"
+# model swap on script-form overlays (bash -c "... vllm serve <model> ..."): the id is replaced inside the script
+for p in profiles/tiered-cpu-gke.yaml profiles/wide-ep-gke.yaml; do
+  up=$(yq .model "$p")
+  yq '.model = "test-org/Swapped-Model-7B"' "$p" > "$T/swap.yaml"
+  n=$(./deploy.sh "$T/swap.yaml" --name)
+  ./deploy.sh "$T/swap.yaml" --dry-run >/dev/null 2>&1 || fail "$n" "render with a swapped model failed"
+  cmds=$(yq -N -o=json -I=0 "$VLLM_POD | .containers[] | select($VLLM_CTR) | $CMD" ".build/$n/modelserver.yaml")
+  while read -r c; do
+    [[ $c == *"vllm serve"* && $c == *test-org/Swapped-Model-7B* ]] || fail "$n" "script does not serve the swapped model: ${c:0:160}"
+    [[ $c != *"$up"* ]] || fail "$n" "script still mentions $up"
+  done <<<"$cmds"
+done
+echo "ok  model swap inside script-form overlays"
 
 # air-gapped mode (needs .cache/images.lock from ./bundle.sh): every image -> registry, pinned by digest
 if [[ -f .cache/images.lock ]]; then
