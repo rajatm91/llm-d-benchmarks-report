@@ -1,3 +1,5 @@
 .cache/
 .build/
 dist/
+envs/*.env
+!envs/example.env

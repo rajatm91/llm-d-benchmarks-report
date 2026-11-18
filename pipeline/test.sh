@@ -116,5 +116,13 @@ if [[ -f .cache/images.lock ]]; then
     [[ -z $bad ]] || fail "$n" "images not mirrored/pinned: $(echo $bad)"
   done
   echo "ok  air-gapped image rewrite for all profiles"
+  # custom layout: IMAGE_TEMPLATE drives both the mirror list (bundle.sh) and this rewrite, via lib/images.sh
+  for p in profiles/*.yaml; do
+    n=$(./deploy.sh "$p" --name)
+    IMAGE_REGISTRY=registry.test/llm-d IMAGE_TEMPLATE='{registry}/{path}:{tag}' ./deploy.sh "$p" --dry-run >/dev/null 2>&1 || fail "$n" "render with IMAGE_TEMPLATE failed"
+    bad=$(yq -N '.. | select(tag == "!!map" and has("image")) | .image' ".build/$n/modelserver.yaml" ".build/$n/router.yaml" | grep -v '^registry\.test/llm-d/[^@]*:[^/@]*$' || true)
+    [[ -z $bad ]] || fail "$n" "IMAGE_TEMPLATE not applied: $(echo $bad)"
+  done
+  echo "ok  IMAGE_TEMPLATE layout for all profiles"
 fi
 echo "all checks passed"

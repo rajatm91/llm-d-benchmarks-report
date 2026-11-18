@@ -1,0 +1,27 @@
+# Gemma 4 31B-it on llm-d 1.0 with vLLM v0.34.0, optimized baseline (prefix-cache affinity + load).
+#   llm-d 1.0  = guides at the v1.0.0 tag (llmdRef) + router chart v1.0.0 + EPP image v1.0.0.
+#                The v1.0.0 chart still defaults the EPP image to :main, so it is pinned below.
+#   vLLM 0.34  = modelserver.image; llm-d 1.0's own base image is v0.31.0.
+# Sized for 5 x g4-standard-48 (1 NVIDIA RTX PRO 6000, 96 GB, per node): whole model on one GPU,
+# one replica per node. Weights: gs://models_registry/google__gemma_4_31b_it (stored by garuda).
+model: google/gemma-4-31B-it
+strategy: llmd1                           # -> name gemma-4-31b-it-llmd1-vllm
+llmdRef: 378b42d18dabe0b9c4ced4e6f3670d93b52db08e   # llm-d/llm-d tag v1.0.0
+modelserver:
+  overlay: guides/optimized-baseline/modelserver/gpu/vllm/base
+  image: docker.io/vllm/vllm-openai:v0.34.0
+  tensorParallel: 1                       # BF16 weights ~62.5 GB fit on the 96 GB GPU
+  replicas: 5                             # nodes x GPUs per node / tensorParallel = 5 x 1 / 1
+  args:
+    - --max-model-len=32768               # ~24 GB left for KV cache; check "GPU KV cache size" in the log
+    # - --quantization=fp8                # optional: weights ~31 GB -> ~55 GB for KV cache
+router:
+  chartVersion: v1.0.0
+  values:
+    - guides/optimized-baseline/router/optimized-baseline.values.yaml
+  set:
+    - router.epp.image.tag=v1.0.0
+gateway:
+  provider: agentgateway
+  name: llm-d-inference-gateway
+  namespace: agentgateway-system
