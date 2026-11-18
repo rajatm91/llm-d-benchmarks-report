@@ -206,6 +206,7 @@ Re-tune these whenever you combine paths:
 | `baseline-specdec-agentgateway.yaml` | Optimized baseline + draft-model speculative decoding | agentgateway |
 | `qwen3.8-27b-baseline-agentgateway.yaml` | Qwen3.8-27B on baseline + built-in MTP (model swap example) | agentgateway |
 | `gemma-4-31b-baseline-agentgateway.yaml` | Gemma 4 31B on baseline, TP=2 (model swap example) | agentgateway |
+| `gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml` | Gemma 4 31B pinned to **llm-d 1.0** (guides, chart, EPP image) + **vLLM v0.34.0**, 5 × g4-standard-48 | agentgateway |
 | `tiered-cpu-gke.yaml` | Tiered prefix cache (CPU) | GKE |
 | `pd-gke.yaml` | P/D | GKE |
 | `pd-tiered-cpu-agentgateway.yaml` | **P/D + tiered CPU** (combo) | agentgateway |

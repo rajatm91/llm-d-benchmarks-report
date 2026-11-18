@@ -416,6 +416,32 @@ data:
 
 If routes already exist on the Gateway and `baseModel` is not set, `deploy.sh` stops.
 
+### Sample I: changing what an overlay hard-codes (patch)
+
+For anything without a profile field, such as memory or GPU count per P/D role, add a kustomize patch:
+
+```yaml
+# models/gpt-oss-pd-bigger-decode/patch.yaml   →  modelserver.patches: [models/gpt-oss-pd-bigger-decode/patch.yaml]
+apiVersion: disaggregatedset.x-k8s.io/v1
+kind: DisaggregatedSet
+metadata:
+  name: pd-disagg-vllm                     # upstream name (renaming happens after patches)
+spec:
+  roles:
+    - name: decode
+      spec:
+        leaderWorkerTemplate:
+          workerTemplate:
+            spec:
+              containers:
+                - name: modelserver
+                  resources:
+                    limits:   {memory: 128Gi}
+                    requests: {memory: 128Gi}
+```
+
+For a `DisaggregatedSet`, list `guides/recipes/modelserver/components/disaggregatedset-schema` in `modelserver.components`, so patches merge roles, containers and volumes by name.
+
 ### Sample J: newer vLLM image, one GPU per node (5 × g4-standard-48)
 
 A `g4-standard-48` has **one** NVIDIA RTX PRO 6000 (96 GB). Gemma 4 31B in BF16 (about 62.5 GB) fits on it, so run one whole-GPU replica per node. TP across nodes would go over the network.
@@ -445,31 +471,43 @@ gateway:
 - **Node pool:** to keep the pods on the G4 pool, add a `nodeSelector` (`cloud.google.com/gke-nodepool: <pool>`) and a `nvidia.com/gpu` toleration through `modelserver.patches`, as in sample I.
 - **New image:** with a new `image`, re-run `./bundle.sh` for this profile so the image is locked and mirrored. Otherwise the air-gapped render stops with "image ... is not in .cache/images.lock".
 
-### Sample I: changing what an overlay hard-codes (patch)
+### Sample K: pinning the llm-d and vLLM versions
 
-For anything without a profile field, such as memory or GPU count per P/D role, add a kustomize patch:
+This is Gemma 4 31B on **llm-d 1.0** with **vLLM v0.34.0**, sized for the 5 × g4-standard-48 pool from sample J. Pinning "llm-d 1.0" means pinning three things, because each one has its own default:
+
+| Piece | Profile key | Value | Default otherwise |
+| --- | --- | --- | --- |
+| guides (overlays, router values) | `llmdRef` | `378b42d…`, the commit of tag `v1.0.0` | the pipeline's `LLMD_REF` |
+| router chart | `router.chartVersion` | `v1.0.0` | `v0`, a moving tag |
+| EPP image | `router.set: [router.epp.image.tag=v1.0.0]` | `v1.0.0` | `:main`, even in the v1.0.0 chart |
+| vLLM | `modelserver.image` | `vllm-openai:v0.34.0` | the overlay's image (llm-d 1.0 ships v0.31.0) |
 
 ```yaml
-# models/gpt-oss-pd-bigger-decode/patch.yaml   →  modelserver.patches: [models/gpt-oss-pd-bigger-decode/patch.yaml]
-apiVersion: disaggregatedset.x-k8s.io/v1
-kind: DisaggregatedSet
-metadata:
-  name: pd-disagg-vllm                     # upstream name (renaming happens after patches)
-spec:
-  roles:
-    - name: decode
-      spec:
-        leaderWorkerTemplate:
-          workerTemplate:
-            spec:
-              containers:
-                - name: modelserver
-                  resources:
-                    limits:   {memory: 128Gi}
-                    requests: {memory: 128Gi}
+# profile: profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml
+model: google/gemma-4-31B-it
+strategy: llmd1                           # -> name gemma-4-31b-it-llmd1-vllm
+llmdRef: 378b42d18dabe0b9c4ced4e6f3670d93b52db08e   # llm-d/llm-d tag v1.0.0
+modelserver:
+  overlay: guides/optimized-baseline/modelserver/gpu/vllm/base
+  image: docker.io/vllm/vllm-openai:v0.34.0
+  tensorParallel: 1                       # BF16 weights ~62.5 GB fit on the 96 GB GPU
+  replicas: 5                             # nodes x GPUs per node / tensorParallel = 5 x 1 / 1
+  args:
+    - --max-model-len=32768               # ~24 GB left for KV cache; check "GPU KV cache size" in the log
+    # - --quantization=fp8                # optional: weights ~31 GB -> ~55 GB for KV cache
+router:
+  chartVersion: v1.0.0
+  values:
+    - guides/optimized-baseline/router/optimized-baseline.values.yaml
+  set:
+    - router.epp.image.tag=v1.0.0
+gateway:
+  provider: agentgateway
+  name: llm-d-inference-gateway
+  namespace: agentgateway-system
 ```
 
-For a `DisaggregatedSet`, list `guides/recipes/modelserver/components/disaggregatedset-schema` in `modelserver.components`, so patches merge roles, containers and volumes by name.
+Run `./bundle.sh profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml` once on the connected side. It fetches the llm-d 1.0 guides and chart into `.cache/` next to the other versions, and locks vLLM v0.34.0 and EPP v1.0.0. After that, the profile deploys air-gapped like any other. Profiles on different llm-d versions can coexist in one bundle.
 
 ---
 
