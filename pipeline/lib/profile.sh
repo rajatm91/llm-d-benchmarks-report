@@ -28,7 +28,8 @@ MODEL_BUCKET=${MODEL_BUCKET:-gs://models_registry}
 MODEL_CACHE_PATH=${MODEL_CACHE_PATH:-/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models}  # hostPath (GKE local SSD)
 DOWNLOADER_IMAGE=${DOWNLOADER_IMAGE:-gcr.io/google.com/cloudsdktool/google-cloud-cli:slim}
 SMOKE_IMAGE=${SMOKE_IMAGE:-docker.io/curlimages/curl:8.11.1}
-# Air-gapped: every image is rewritten into IMAGE_REGISTRY per IMAGE_TEMPLATE (lib/images.sh).
+# Air-gapped: every image is rewritten to a pull-through repo (IMAGE_REMOTES) or into IMAGE_REGISTRY
+# per IMAGE_TEMPLATE. Both are read in lib/images.sh.
 IMAGE_REGISTRY=${IMAGE_REGISTRY:-}                      # e.g. us-docker.pkg.dev/my-proj/llm-d
 
 # load_profile: profile YAML -> the variables above, then the derived NAME

@@ -38,6 +38,7 @@ These describe the target, not the model, so they live in `envs/<env>.env` (copy
 | `DOWNLOADER_IMAGE` | `gcr.io/google.com/cloudsdktool/google-cloud-cli:slim` | deploy, bundle | Image of the init container that copies weights from GCS. |
 | `SMOKE_IMAGE` | `docker.io/curlimages/curl:8.11.1` | deploy, bundle | Image of the post-deploy smoke test. |
 | `IMAGE_REGISTRY` | unset (public registries) | deploy, bundle | Your registry, e.g. `us-docker.pkg.dev/<proj>/llm-d`. Set it and every image is rewritten into it. |
+| `IMAGE_REMOTES` | unset | deploy, bundle | Artifact Registry remote repos, one per upstream host: `'docker.io=<repo> ghcr.io=<repo> gcr.io=<repo> quay.io=<repo>'`. Images from a listed host become `<repo>/<upstream path>@<digest>` and are left off the mirror list. Other hosts use `IMAGE_REGISTRY`. |
 | `IMAGE_TEMPLATE` | `{registry}/{host}/{path}@{digest}` | deploy, bundle | Layout inside `IMAGE_REGISTRY`. Placeholders: `{registry} {host} {path} {name} {tag} {digest}` ([`lib/images.sh`](../lib/images.sh)). Must be the same for bundle and deploy. |
 | `OUT` | `dist` | bundle | Where the tarball and mirror list go. |
 | `INFERENCE_CRDS_URL` | GAIE `releases/latest/.../v1-manifests.yaml` | bundle | InferencePool CRDs cached into `.cache/crds/`. |

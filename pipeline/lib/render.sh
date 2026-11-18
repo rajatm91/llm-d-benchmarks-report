@@ -189,9 +189,10 @@ render_router() {
   NAME=$NAME yq -i '.metadata.labels."llm-d.ai/deployment" = strenv(NAME)' "$ROUTER"
 }
 
-# Air-gapped (IMAGE_REGISTRY set): every image -> IMAGE_REGISTRY per IMAGE_TEMPLATE, digests from .cache/images.lock
+# Air-gapped (IMAGE_REGISTRY and/or IMAGE_REMOTES set): every image -> its remote repo, or IMAGE_REGISTRY
+# per IMAGE_TEMPLATE (lib/images.sh); always pinned to the digest in .cache/images.lock
 mirror_images() {
-  [[ -n $IMAGE_REGISTRY ]] || return 0
+  [[ -n $IMAGE_REGISTRY || -n $IMAGE_REMOTES ]] || return 0
   local f img new
   for f in "$MS" "$ROUTER"; do
     while read -r img; do
@@ -206,5 +207,7 @@ mirror_image() {
   local src dig; src=$(norm_image "$1")
   dig=$(awk -v s="$src" '$1 == s { print $2 }' "$ROOT/.cache/images.lock" 2>/dev/null)
   [[ -n $dig ]] || die "image $src is not in .cache/images.lock; re-run ./bundle.sh (with this profile) on a connected machine"
+  [[ -n $IMAGE_REGISTRY || -n $(image_remote "${src%%/*}") ]] ||
+    die "image $src: no remote repo for ${src%%/*} in IMAGE_REMOTES, and no IMAGE_REGISTRY to mirror it into"
   image_target "$src" "$dig"
 }

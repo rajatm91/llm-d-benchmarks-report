@@ -237,6 +237,8 @@ set -a; source envs/prod.env; set +a        # IMAGE_REGISTRY + IMAGE_TEMPLATE fi
 
 ### 2.1 Mirror the images into GAR
 
+> **Using Artifact Registry remote repos?** Set `IMAGE_REMOTES` (one `host=<repo>` per upstream: `docker.io`, `ghcr.io`, `gcr.io`, `quay.io`) in the env file for both `bundle.sh` and `deploy.sh`. Those images are pulled through the remote repos by digest and drop off the mirror list, so with all four hosts mapped you can skip this section and 2.2. The node service account needs `roles/artifactregistry.reader` on those repos.
+
 With your own tooling, copy each row of the mirror list. Example rows with `IMAGE_TEMPLATE='{registry}/{path}:{tag}'`:
 
 ```
