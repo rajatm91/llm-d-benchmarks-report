@@ -393,6 +393,10 @@ kubectl get serviceaccount "$SERVICE_ACCOUNT" -n "$NAMESPACE" >/dev/null 2>&1 ||
   die "ServiceAccount $NAMESPACE/$SERVICE_ACCOUNT not found (model-server pods run as this pre-existing SA)"
 kubectl get crd inferencepools.inference.networking.k8s.io >/dev/null 2>&1 ||
   die "InferencePool CRD missing. Install: kubectl apply -f $ROOT/.cache/crds/inference-extension-v1.yaml (from bundle.sh), or let GKE >=1.34.0-gke.1626000 with Gateway API enabled manage it"
+if yq -e 'select(.kind == "InferenceObjective")' "$BUILD/router.yaml" >/dev/null 2>&1; then
+  kubectl get crd inferenceobjectives.llm-d.ai >/dev/null 2>&1 ||
+    die "InferenceObjective CRD missing (router.inferenceObjectives). Install: kubectl apply -f $ROOT/.cache/crds/llm-d-router.yaml (from ROUTER_CRDS=1 ./bundle.sh)"
+fi
 if [[ -n $NEEDS_LWS ]]; then
   kubectl get crd leaderworkersets.leaderworkerset.x-k8s.io >/dev/null 2>&1 ||
     die "$NEEDS_LWS needs the LWS controller (>=v0.11.1, --set enableDisaggregatedSet=true). See $LLMD/guides/pd-disaggregation/README.md#prerequisites"

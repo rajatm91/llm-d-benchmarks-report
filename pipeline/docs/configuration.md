@@ -42,6 +42,8 @@ These describe the target, not the model, so they live in `envs/<env>.env` (copy
 | `PUSH_IMAGES` | unset | bundle | `1` = `bundle.sh` copies the images itself instead of only writing `dist/images-to-mirror.tsv`. |
 | `OUT` | `dist` | bundle | Where the tarball and mirror list go. |
 | `INFERENCE_CRDS_URL` | GAIE `releases/latest/.../v1-manifests.yaml` | bundle | InferencePool CRDs cached into `.cache/crds/`. |
+| `ROUTER_CRDS` | unset | bundle | `1` = also cache the llm-d-router CRDs (`InferenceObjective`, `InferenceModelRewrite`) as `.cache/crds/llm-d-router.yaml`. Needed for flow-control priorities. |
+| `ROUTER_CRDS_URL` | llm-d-router `releases/download/v1.0.0/manifests.yaml` | bundle | Where those come from. Must hold CRDs only. |
 
 ## 3. Profile fields
 
@@ -125,7 +127,7 @@ The pipeline always sets these, so values files can't change them: `router.model
 | `p2p-kv-cache-sharing` | `base` `rdma` | `p2p-kv-cache-sharing/router/p2p-kv-cache-sharing.values.yaml` | ✅ |
 | `multimodal-serving/aggregation` | `base` `gke` | `multimodal-serving/aggregation/router/aggregation.values.yaml` | ✅ (use a vision model) |
 | `multimodal-serving/e-disaggregation` | `e-p-d/{base,gke,coreweave}`, `e-pd/{base,gke,coreweave}` | `multimodal-serving/e-disaggregation/router/vllm/e-p-d-disaggregation.values.yaml` / `e-pd-…` | ➕ LWS; untested here |
-| `flow-control` | none: uses `optimized-baseline` | `flow-control/router/flow-control.values.yaml` | ➕ priorities need `router.inferenceObjectives` ([7](#7-router-chart-keys-routerset)) and the llm-d-router CRDs (`InferenceObjective`, not in the bundle); retune `maxConcurrency` (`guides/flow-control/tuning.md`) |
+| `flow-control` | none: uses `optimized-baseline` | `flow-control/router/flow-control.values.yaml` | ➕ priorities need `router.inferenceObjectives` ([7](#7-router-chart-keys-routerset)) and the `InferenceObjective` CRD (`ROUTER_CRDS=1 ./bundle.sh`); retune `maxConcurrency` (`guides/flow-control/tuning.md`) |
 | `turn-priority-fairness` | `base` `gke` (or `optimized-baseline`) | `turn-priority-fairness/router/turn-priority-fairness.values.yaml` | ➕ same as flow-control |
 | `batch-serving/asynchronous-processing/multitenant` | `base` `gke` `single-gpu` | `…/values/router/flow-control-{evictable,holdback}.yaml` | ➕ objectives + async broker; untested here |
 | `agentic-api` | `base` `gke` | `optimized-baseline/router/optimized-baseline.values.yaml` | ➕ Postgres secret and the agentic API service |
@@ -222,7 +224,7 @@ Full list: `yq '..' .cache/charts/llm-d-router-gateway-<ver>/charts/router/value
 | --- | --- |
 | Node pool, tolerations, affinity, memory, shm size, env vars | `modelserver.patches` |
 | TP or replicas on P/D or wide-EP | `modelserver.patches` on the `DisaggregatedSet` / `LeaderWorkerSet` (+ `disaggregatedset-schema`) |
-| Flow-control priorities | `router.inferenceObjectives` in `router.set` or a values file. Install the `InferenceObjective` CRD first (`llm-d-router` release `manifests.yaml`). |
+| Flow-control priorities | `router.inferenceObjectives` in `router.set` or a values file. Install the `InferenceObjective` CRD first: `ROUTER_CRDS=1 ./bundle.sh`, then `kubectl apply -f .cache/crds/llm-d-router.yaml`. `deploy.sh` stops if it is missing. |
 | A guide that needs extra objects (Mooncake master, Postgres, ModelExpress, FMA, KEDA, ...) | Apply them yourself before `deploy.sh`. The pipeline only applies the model servers and the router. Air-gapped, mirror their images by hand too. |
 | Several EPPs for one deployment (`coord-disaggregation`) | Not supported |
 | Autoscaling (WVA, KEDA, HPA on model servers) | Separate controllers, see `guides/workload-autoscaling/*`; not part of a profile |

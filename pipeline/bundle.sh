@@ -11,11 +11,13 @@
 #   PUSH_IMAGES=1                                   also copy the images there (needs push access; crane, gcrane,
 #                                                   skopeo or docker buildx). Default: only write the mirror list.
 #   OUT=dist                                        where the tarball and mirror list go
+#   ROUTER_CRDS=1                                   also fetch the llm-d-router CRDs (InferenceObjective,
+#                                                   InferenceModelRewrite) for flow-control priorities
 #
 # Result: dist/llm-d-bundle-<llmd sha>-<date>.tar.gz with this directory, including .cache/:
 #   .cache/llm-d-<sha>/              pinned llm-d guides
 #   .cache/charts/<chart>-<version>/ router helm charts
-#   .cache/crds/                     InferencePool CRDs
+#   .cache/crds/                     InferencePool CRDs (+ llm-d-router.yaml with ROUTER_CRDS=1)
 #   .cache/images.lock               "<image> <digest>" for every image the profiles use
 #   .build/<name>/                   rendered manifests (for review; deploy.sh re-renders on the inside)
 # and dist/images-to-mirror.tsv: "<repo>@<digest> <tab> <target in your registry> <tab> <original>" per image,
@@ -35,6 +37,8 @@ source lib/images.sh
 [[ -z $PUSH_IMAGES || -n $IMAGE_REGISTRY ]] || die "PUSH_IMAGES=1 needs IMAGE_REGISTRY"
 OUT=${OUT:-dist}
 INFERENCE_CRDS_URL=${INFERENCE_CRDS_URL:-https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/latest/download/v1-manifests.yaml}
+ROUTER_CRDS=${ROUTER_CRDS:-}
+ROUTER_CRDS_URL=${ROUTER_CRDS_URL:-https://github.com/llm-d/llm-d-router/releases/download/v1.0.0/manifests.yaml}
 
 # ---- 1. render every profile: fetches llm-d + charts into .cache/, renders into .build/ ----
 # Images are collected from these renders; deploy.sh re-renders inside with the real settings.
@@ -46,6 +50,13 @@ done
 mkdir -p .cache/crds
 log "fetching InferencePool CRDs"
 curl -fsSL "$INFERENCE_CRDS_URL" -o .cache/crds/inference-extension-v1.yaml
+if [[ -n $ROUTER_CRDS ]]; then
+  log "fetching llm-d-router CRDs"
+  curl -fsSL "$ROUTER_CRDS_URL" -o .cache/crds/llm-d-router.yaml
+  # CRDs only: anything else would carry images that are not in the lock
+  [[ $(yq -N '.kind' .cache/crds/llm-d-router.yaml | grep -v '^---$' | sort -u) == CustomResourceDefinition ]] ||
+    die "$ROUTER_CRDS_URL holds more than CRDs"
+fi
 
 # ---- 2. lock image digests, write the mirror list (optionally push) --------------------------
 IMAGES=$( { for p in "${PROFILES[@]}"; do n=$(./deploy.sh "$p" --name)
