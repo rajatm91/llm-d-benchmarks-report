@@ -11,6 +11,9 @@ folder() { python3 -c 'import re,sys; o,n=sys.argv[1].lower().split("/",1); prin
 [[ $(folder google/gemma-4-31B-it) == google__gemma_4_31b_it ]] || fail layout "folder() disagrees with garuda's documented example"
 WORKLOADS='.kind == "Deployment" or .kind == "LeaderWorkerSet" or .kind == "DisaggregatedSet"'
 POD_LABELS='.. | select(tag == "!!map" and has("metadata") and (.spec | tag) == "!!map" and (.spec | has("containers"))) | .metadata.labels'
+CMD='((.command // []) + (.args // [])) | join(" ")'                 # a container's command line
+VLLM_CTR="$CMD | test(\"vllm\\\\s+serve\")"                         # a container running `vllm serve`
+VLLM_POD=".. | select(tag == \"!!map\" and has(\"containers\")) | select([.containers[] | $VLLM_CTR] | any_c(.))"
 # exit 0 if every selector label is on the pod labels: matches <selector-json> <labels-json>
 matches() { python3 -c 'import json,sys; s,l=json.loads(sys.argv[1]),json.loads(sys.argv[2]); sys.exit(any(l.get(k)!=v for k,v in s.items()))' "$1" "$2"; }
 
@@ -39,14 +42,14 @@ for p in profiles/*.yaml; do
       grep -qx "$ref" <<<"$wls" || fail "$NAME" "router references workload '$ref' but render has: $(echo $wls)"
     done
     # GCS weights: every vLLM pod fetches first, loads offline, never needs the HF token
-    v='.. | select(tag == "!!map" and has("containers")) | select([.containers[] | ((.command // []) + (.args // [])) | join(" ")] | any_c(test("vllm\\s+serve")))'
+    v=$VLLM_POD
     [[ $(yq -N "$v | .initContainers[0].name" "$B/modelserver.yaml" | sort -u) == fetch-model ]] || fail "$NAME" "vLLM pod without fetch-model as first init container"
     want="models--${MODEL//\//--} ${MODEL_BUCKET%/}/$(folder "$MODEL")"
     [[ -z $DRAFT_MODEL ]] || want+=$'\n'"models--${DRAFT_MODEL//\//--} ${MODEL_BUCKET%/}/$(folder "$DRAFT_MODEL")"
     [[ $(yq -o=json -I=0 "$v | .initContainers[0].env[] | select(.name == \"MODELS\") | .value" "$B/modelserver.yaml" | sort -u) == "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$want")" ]] ||
       fail "$NAME" "fetch-model MODELS is not: $want"
     # model swap: every vLLM command runs MODEL, pods are labelled with it, no foreign model id left
-    cmds=$(yq -N -o=json -I=0 "$v | .containers[] | select(((.command // []) + (.args // [])) | join(\" \") | test(\"vllm\\s+serve\")) | ((.command // []) + (.args // [])) | join(\" \")" "$B/modelserver.yaml")
+    cmds=$(yq -N -o=json -I=0 "$v | .containers[] | select($VLLM_CTR) | $CMD" "$B/modelserver.yaml")
     while read -r c; do [[ $c == *"$MODEL"* ]] || fail "$NAME" "vLLM command does not run $MODEL: ${c:0:160}"; done <<<"$cmds"
     [[ $(yq -N "select($WORKLOADS) | $POD_LABELS | .\"llm-d.ai/model\"" "$B/modelserver.yaml" | sort -u) == "${MODEL##*/}" ]] || fail "$NAME" "pod llm-d.ai/model label is not ${MODEL##*/}"
     # sizing + extra args land in every vLLM container
@@ -60,14 +63,13 @@ for p in profiles/*.yaml; do
     [[ $SPEC_SET != true ]] || [[ $(grep -c 'speculative-config' <<<"$cmds") -eq $(wc -l <<<"$cmds") ]] || fail "$NAME" "speculativeConfig not applied"
     # draft model: --speculative-config right after the positional model in every vLLM container
     if [[ -n $DRAFT_MODEL ]]; then
-      cmds=$(yq -N -o=json -I=0 "$v | .containers[] | select(((.command // []) + (.args // [])) | join(\" \") | test(\"vllm\\s+serve\")) | ((.command // []) + (.args // [])) | join(\" \")" "$B/modelserver.yaml")
       while read -r c; do
         re="vllm serve[ \\\\n]+${MODEL}[ \\\\n].*--speculative-config"   # model stays first positional
         [[ $c =~ $re ]] || fail "$NAME" "spec config missing or model not first: ${c:0:200}"
         [[ $c == *"\\\"model\\\":\\\"$DRAFT_MODEL\\\""* ]] || fail "$NAME" "spec config lacks draft model $DRAFT_MODEL"
       done <<<"$cmds"
     fi
-    [[ $(yq -N "$v | .containers[] | select(((.command // []) + (.args // [])) | join(\" \") | test(\"vllm\\s+serve\")) | (.env[] | select(.name == \"HF_HUB_OFFLINE\") | .value) + \":\" + (.volumeMounts[] | select(.name == \"model-cache\") | .mountPath + \":\" + (.readOnly | tostring))" "$B/modelserver.yaml" | sort -u) == "1:/model-cache:true" ]] || fail "$NAME" "vLLM container not offline / model-cache not mounted read-only"
+    [[ $(yq -N "$v | .containers[] | select($VLLM_CTR) | (.env[] | select(.name == \"HF_HUB_OFFLINE\") | .value) + \":\" + (.volumeMounts[] | select(.name == \"model-cache\") | .mountPath + \":\" + (.readOnly | tostring))" "$B/modelserver.yaml" | sort -u) == "1:/model-cache:true" ]] || fail "$NAME" "vLLM container not offline / model-cache not mounted read-only"
     ! grep -q 'llm-d-hf-token' "$B/modelserver.yaml" || fail "$NAME" "still references the HF token secret"
     [[ -z $(yq -N "select(($WORKLOADS) | not) | .. | select(tag == \"!!map\" and has(\"initContainers\")) | .initContainers[] | select(.name == \"fetch-model\") | .name" "$B/modelserver.yaml") ]] || fail "$NAME" "fetch-model injected into a non-model-server pod"
     # HTTPRoute attaches to the existing Gateway and points at this release's pool
@@ -99,7 +101,7 @@ for p in profiles/pd-gke.yaml profiles/wide-ep-pd-tiered-glm-agentgateway.yaml; 
   yq '.modelserver.image = "registry.test/vllm-custom:1.2.3"' "$p" > "$T/img.yaml"
   ./deploy.sh "$T/img.yaml" --dry-run >/dev/null 2>&1 || fail "$n" "render with modelserver.image failed"
   imgs ".build/$n/modelserver.yaml" > "$T/after"
-  vllm=$(yq -N '.. | select(tag == "!!map" and has("containers")) | .containers[] | select(((.command // []) + (.args // [])) | join(" ") | test("vllm\\s+serve")) | .name' ".build/$n/modelserver.yaml" | sort -u)
+  vllm=$(yq -N "$VLLM_POD | .containers[] | select($VLLM_CTR) | .name" ".build/$n/modelserver.yaml" | sort -u)
   while read -r c img; do
     if grep -qx "$c" <<<"$vllm"; then [[ $img == registry.test/vllm-custom:1.2.3 ]] || fail "$n" "vLLM container $c kept $img"
     else grep -qx "$c $img" "$T/before" || fail "$n" "non-vLLM container $c changed to $img"; fi

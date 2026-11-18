@@ -1,0 +1,3 @@
+# modelserver.image: only containers that run `vllm serve`; sidecars and init containers keep theirs.
+# env: IMG
+(@VLLM_POD@ | .containers[] | select(@VLLM_CTR@) | .image) = strenv(IMG)

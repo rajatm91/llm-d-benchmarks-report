@@ -22,15 +22,15 @@ Needs `kubectl` (with built-in kustomize), `helm` ≥ 3.8 (OCI), `yq` v4, `git`,
 
 Every model is deployed into **one shared namespace** (`NAMESPACE`, default `llm-d`), and its model-server pods run as **one pre-existing ServiceAccount** (`SERVICE_ACCOUNT`, default `llm-d-modelserver`). Both must exist before the first deploy. Preflight checks for them.
 
-Names are derived, not hand-written: `NAME_TEMPLATE='{model}-{strategy}-{engine}'`.
+Names are derived, not hand-written: `<model>-<strategy>-<engine>`.
 
 | Part | Source | Example |
 | --- | --- | --- |
-| `{model}` | `MODEL_ALIAS`, or the HF repo name, lowercased, non-alphanumerics → `-` | `Qwen/Qwen3-32B` → `qwen3-32b` |
-| `{strategy}` | `STRATEGY` in the profile | `pd-tiered-cpu` |
-| `{engine}` | inferred from `MODELSERVER_OVERLAY` (`vllm`/`sglang`/`trtllm`), or `ENGINE` | `vllm` |
+| `<model>` | `modelAlias`, or the HF repo name, lowercased, non-alphanumerics → `-` | `Qwen/Qwen3-32B` → `qwen3-32b` |
+| `<strategy>` | `strategy` in the profile | `pd-tiered-cpu` |
+| `<engine>` | from the overlay path (`/vllm/`, `/sglang/` or `/trtllm/`) | `vllm` |
 
-The result must be a DNS label of at most 40 characters. Set `MODEL_ALIAS` when it is longer. `./deploy.sh <profile> --name` prints it.
+The result must be a DNS label of at most 40 characters. Set `modelAlias` when it is longer. `./deploy.sh <profile> --name` prints it.
 
 What `deploy.sh` does to the upstream render so that models can coexist:
 - It drops upstream `ServiceAccount`s and points every `serviceAccountName` at `SERVICE_ACCOUNT`.
@@ -49,7 +49,7 @@ set -a; source envs/prod.env; set +a   # IMAGE_REGISTRY + IMAGE_TEMPLATE: where 
 ```
 1. **Renders every profile.** This fills `.cache/` (the pinned llm-d guides, the router chart under `.cache/charts/`, the InferencePool CRDs under `.cache/crds/`) and `.build/`.
 2. **Locks image digests.** Every image the renders use, plus the smoke-test image, is resolved to a digest in `.cache/images.lock`. Moving tags like `:main`, `:nightly` and `:latest` are frozen there.
-3. **Writes the mirror list** `dist/images-to-mirror.tsv`: `repo@digest <tab> target in your registry <tab> original` per image. Copy the images into GAR yourself, from the first column to the second. With `PUSH_IMAGES=1`, `bundle.sh` copies them itself (crane, gcrane, skopeo or `docker buildx`).
+3. **Writes the mirror list** `dist/images-to-mirror.tsv`: `repo@digest <tab> target in your registry <tab> original` per image. Copy the images into GAR yourself, from the first column to the second. `bundle.sh` never pushes; it needs `crane` or `docker buildx` only to resolve digests.
 4. **Packs** this directory, including `.cache/`, into `dist/llm-d-bundle-<llmd sha>-<date>.tar.gz`.
 
 `IMAGE_TEMPLATE` sets the layout in your registry (`lib/images.sh`). For `docker.io/vllm/vllm-openai:v0.34.0`:
@@ -79,7 +79,7 @@ gs://models_registry/<folder>/          # the model repo files at the top: confi
   Qwen/Qwen3.8-27B       -> gs://models_registry/qwen__qwen3_8_27b
   zai-org/GLM-5.2-FP8    -> gs://models_registry/zai_org__glm_5_2_fp8
 ```
-`MODEL_BUCKET` (default `gs://models_registry`) changes the bucket. `weights.gcsUri` / `weights.draftGcsUri` in a profile override the full path for one model. No Hugging Face access and no token are needed.
+`MODEL_BUCKET` (default `gs://models_registry`) changes the bucket. `weights.gcsUri` in a profile overrides the full path for the model. No Hugging Face access and no token are needed.
 
 How it works: `deploy.sh` adds a `fetch-model` init container to every pod that runs `vllm serve`.
 - **Download:** it runs `gcloud storage rsync` from the bucket to a node-local hostPath (`MODEL_CACHE_PATH`, default GKE local SSD `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models`).
@@ -102,7 +102,7 @@ draftModel: Qwen/Qwen3-0.6B          # HF id of the draft (or an EAGLE head); om
 speculativeConfig:                   # optional, default {num_speculative_tokens: 5}; "model" is filled from draftModel
   num_speculative_tokens: 5          # e.g. method: eagle3, draft_tensor_parallel_size: 1
 ```
-- **Weights:** the draft comes from the same bucket and naming (`Qwen/Qwen3-0.6B` → `gs://models_registry/qwen__qwen3_0_6b`, override with `weights.draftGcsUri`). The same `fetch-model` step downloads both models into the node cache.
+- **Weights:** the draft comes from the same bucket and naming (`Qwen/Qwen3-0.6B` → `gs://models_registry/qwen__qwen3_0_6b`). The same `fetch-model` step downloads both models into the node cache.
 - **Flag placement:** `--speculative-config` is added to every vLLM container. In list-form overlays it is appended to `args`. In script-form overlays (`bash -c "exec vllm serve ..."`) it is inserted right after the model, because vLLM expects `vllm serve <model> --flags`. The render fails if any vLLM container ends up without the flag.
 - **MTP overlays:** overlays that already configure speculative decoding (for example GLM-5.2's MTP) are rejected when `DRAFT_MODEL` is set.
 - **P/D and wide-EP:** a draft model is not covered by the upstream guides on these paths, so the render prints a warning. Validate before production.
@@ -222,10 +222,8 @@ Re-tune these whenever you combine paths:
 Profile schema (YAML). Unknown keys fail the render, so a typo can't silently fall back to a default:
 ```yaml
 model: Qwen/Qwen3-32B                # required: HF id (also gives the GCS folder: qwen__qwen3_32b)
-strategy: baseline-specdec           # required: the {strategy} part of the name
-modelAlias: qwen3-32b                # optional: short {model} part when the name exceeds 40 chars
-engine: vllm                         # optional: inferred from modelserver.overlay
-nameTemplate: "{model}-{strategy}-{engine}"
+strategy: baseline-specdec           # required: the <strategy> part of the name
+modelAlias: qwen3-32b                # optional: short <model> part when the name exceeds 40 chars
 draftModel: Qwen/Qwen3-0.6B          # optional: enables --speculative-config
 speculativeConfig: {num_speculative_tokens: 5}   # with draftModel, or alone with a built-in method (method: mtp)
 modelserver:
@@ -242,10 +240,12 @@ router:
   mode: gateway                      # gateway | standalone
   chartVersion: v0
 gateway: {provider: agentgateway, name: llm-d-inference-gateway, namespace: agentgateway-system, baseModel: ""}
-weights: {gcsUri: "", draftGcsUri: ""}   # override $MODEL_BUCKET/<folder> per model
+weights: {gcsUri: ""}               # override $MODEL_BUCKET/<folder> for the model
 llmdRef: 565373b741e90bffa27930b4669c6e1f222f6225
 waitTimeout: 60m
 ```
-Environment-wide settings come from env vars or Jenkins, not from profiles: `NAMESPACE`, `SERVICE_ACCOUNT`, `MODEL_BUCKET`, `MODEL_CACHE_PATH`, `DOWNLOADER_IMAGE`, `IMAGE_REGISTRY`. `./deploy.sh <profile> --env` prints the resolved settings. Paths that start with `guides/` resolve inside the pinned llm-d checkout. Any other path resolves relative to this directory.
+Environment-wide settings come from env vars or Jenkins, not from profiles: `NAMESPACE`, `SERVICE_ACCOUNT`, `MODEL_BUCKET`, `MODEL_CACHE_PATH`, `DOWNLOADER_IMAGE`, `IMAGE_REGISTRY`, `IMAGE_TEMPLATE` (see [`envs/example.env`](envs/example.env)). `./deploy.sh <profile> --env` prints the resolved settings.
+
+Code layout: `deploy.sh` is only the step list. The steps live in `lib/profile.sh` (settings, naming), `lib/render.sh` (render), `lib/cluster.sh` (preflight, apply, wait, smoke test) and `lib/images.sh` (air-gap image names). Each YAML edit is a plain yq program in `lib/yq/`, and the weights init container is `lib/fetch-model.sh` (embedded verbatim in pods: editing it restarts every model server). Paths that start with `guides/` resolve inside the pinned llm-d checkout. Any other path resolves relative to this directory.
 
 **Changing the model** means changing the engine args, the GPU counts and the router sizing. Upstream hard-codes all of them per overlay, so add a `PATCHES` file instead of expecting a single `MODEL` variable to rewrite them. `MODEL` is used only for the smoke test.

@@ -1,0 +1,7 @@
+# modelserver.tensorParallel: rewrite an existing --tensor-parallel-size and the GPU count.
+# (The flag itself is added through modelserver.args when the overlay has none.)
+# env: TP
+(@VLLM_POD@ | .containers[] | select(@VLLM_CTR@)) |= (
+  (.command[], .args[]) |= sub("--tensor-parallel-size(?:=|[ \\t]+)[0-9]+", "--tensor-parallel-size=" + strenv(TP)) |
+  (.resources.limits, .resources.requests) |= with_entries(if (.key | test("gpu$")) then .value = env(TP) else . end)
+)

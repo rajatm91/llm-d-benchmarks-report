@@ -1,0 +1,8 @@
+# Extra vLLM flags. List-form containers: appended to args. Script-form (bash -c "vllm serve <model> ..."):
+# inserted right after the model, since vLLM wants `vllm serve <model> --flags`.
+# env: ARGS (JSON list), RE/REPL (model id -> model id + shell-quoted flags)
+(@VLLM_POD@ | .containers[] | select(@VLLM_CTR@)) |= (
+  if ([(.command // [])[], (.args // [])[]] | any_c(test("vllm\\s+serve")))
+  then (.command[], .args[]) |= sub(strenv(RE), strenv(REPL))
+  else .args = (.args // []) + (strenv(ARGS) | from_json)
+  end)

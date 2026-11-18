@@ -268,7 +268,7 @@ The template says where each source image lives in your registry. `bundle.sh` us
 
 Placeholders: `{registry}`, `{host}`, `{path}`, `{name}` (last path segment), `{tag}`, `{digest}`.
 
-If the bundle machine *can* push to GAR, `PUSH_IMAGES=1 ./bundle.sh ...` copies the images itself, using `crane`, `gcrane`, `skopeo` or `docker buildx`.
+`bundle.sh` never pushes. If the bundle machine can push to GAR, run the copy loop above right after it.
 
 ### 2.3 Model weights
 
@@ -755,7 +755,7 @@ pipeline {
 
 ## Appendix: reference
 
-**Profile keys:** `model`, `strategy`, `modelAlias`, `engine`, `nameTemplate`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas, image}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel}`, `weights.{gcsUri, draftGcsUri}`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
+**Profile keys:** `model`, `strategy`, `modelAlias`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas, image}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel}`, `weights.gcsUri`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
 
 **Environment** (the same for every model, set by Jenkins):
 
@@ -766,6 +766,5 @@ pipeline {
 | `MODEL_BUCKET` | `gs://models_registry` | bucket where garuda stores the weights |
 | `IMAGE_REGISTRY` | (unset) | your GAR repository; needs `.cache/images.lock` |
 | `IMAGE_TEMPLATE` | `{registry}/{host}/{path}@{digest}` | image layout in `IMAGE_REGISTRY` (see [2.2](#22-choose-the-layout-image_template)) |
-| `PUSH_IMAGES` | (unset) | `bundle.sh` only: `1` = copy the images itself instead of only listing them |
 | `MODEL_CACHE_PATH` | `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models` | node-local weight cache |
 | `DOWNLOADER_IMAGE` | `gcr.io/google.com/cloudsdktool/google-cloud-cli:slim` | `fetch-model` image (mirrored by `bundle.sh`) |
