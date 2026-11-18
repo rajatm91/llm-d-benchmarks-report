@@ -4,6 +4,8 @@ This guide takes you from an empty GKE cluster to a model serving traffic throug
 
 Every profile YAML in this guide renders with the pipeline as written. `docs/check-guide.sh` extracts them and runs `./deploy.sh --dry-run` on each.
 
+For the full list of settings and upstream templates, see [configuration.md](configuration.md).
+
 | Step | Who | How often |
 | --- | --- | --- |
 | [0.1 The workflow, and where each setting lives](#01-the-workflow-and-where-each-setting-lives) | everyone | read once |

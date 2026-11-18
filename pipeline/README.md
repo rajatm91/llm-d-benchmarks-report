@@ -1,6 +1,7 @@
 # llm-d deploy pipeline
 
 **New here? Follow [docs/deploy-guide.md](docs/deploy-guide.md)**: a step-by-step walkthrough from an empty cluster to a serving model, with sample YAMLs for every strategy (checked by `docs/check-guide.sh`).
+Everything a profile or environment can change, and every upstream template it can point at: [docs/configuration.md](docs/configuration.md).
 
 Reusable pipeline that deploys a model with any llm-d well-lit path (or a combination of them) and registers it with an **existing** Gateway (agentgateway, GKE Gateway, Istio, …).
 
