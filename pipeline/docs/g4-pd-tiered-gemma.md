@@ -261,6 +261,8 @@ set -a; source envs/prod.env; set +a
 grep -E 'vllm-openai:v0.34.0|disagg-sidecar|endpoint-picker:main|google-cloud-cli:slim|curl:8.11.1' .cache/images.lock   # 5 rows
 ```
 
+GitHub and the image registries on different machines? Run `BUNDLE_STEPS=sources` on the GitHub one and `BUNDLE_STEPS=images` on the registry one, with this profile on both ([deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine)).
+
 Mirror the new rows of `dist/images-to-mirror.tsv` (or use `IMAGE_REMOTES`), as in [deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine). Mirror the LWS and agentgateway images from [1.2](#12-prerequisites-images) separately. `ROUTER_CRDS=1` is not needed.
 
 ---

@@ -4,6 +4,12 @@
 #   ./bundle.sh                                   # all profiles
 #   ./bundle.sh profiles/a.yaml profiles/b.yaml   # only these profiles
 #
+# Split across two machines (one reaches GitHub, the other the image registries):
+#   machine A: BUNDLE_STEPS=sources ./bundle.sh   # guides, charts, CRDs -> $OUT/llm-d-sources-<sha>-<date>.tar.gz
+#   machine B: tar -xzf llm-d-sources-*.tar.gz -C pipeline && cd pipeline
+#              BUNDLE_STEPS=images ./bundle.sh    # no GitHub: digests, mirror list, final bundle tarball
+#   Pass the same profiles (or none) on both machines.
+#
 # Optional environment:
 #   IMAGE_REGISTRY=us-docker.pkg.dev/<proj>/<repo>  your registry (fills the target column of the mirror list)
 #   IMAGE_TEMPLATE='{registry}/{name}:{tag}'        how images are laid out in it (see lib/images.sh); must be
@@ -13,6 +19,7 @@
 #   ROUTER_CRDS=1                                   also fetch the llm-d-router CRDs (InferenceObjective,
 #                                                   InferenceModelRewrite) for flow-control priorities
 #   OUT=dist                                        where the tarball and mirror list go
+#   BUNDLE_STEPS='sources images'                   which half to run (default: both)
 #
 # Result in $OUT:
 #   llm-d-bundle-<llmd sha>-<date>.tar.gz   this directory, including .cache/:
@@ -38,26 +45,43 @@ OUT=${OUT:-dist}
 INFERENCE_CRDS_URL=${INFERENCE_CRDS_URL:-https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/latest/download/v1-manifests.yaml}
 ROUTER_CRDS=${ROUTER_CRDS:-}
 ROUTER_CRDS_URL=${ROUTER_CRDS_URL:-https://github.com/llm-d/llm-d-router/releases/download/v1.0.0/manifests.yaml}
+BUNDLE_STEPS=${BUNDLE_STEPS:-sources images}
+step() { [[ " $BUNDLE_STEPS " == *" $1 "* ]]; }
+step sources || step images || die "BUNDLE_STEPS must contain 'sources' and/or 'images', got '$BUNDLE_STEPS'"
 # settings of the first profile (llm-d ref for the tarball name, smoke-test image)
 eval "$(./deploy.sh "${PROFILES[0]}" --env)"
 
 # ---- 1. render every profile: fetches llm-d + charts into .cache/, renders into .build/ ----
 # Images are collected from these renders; deploy.sh re-renders inside with the real settings.
+# With a .cache/ from the sources step this needs no network (a missing piece fails with a hint).
 for p in "${PROFILES[@]}"; do
   log "rendering $p"
   IMAGE_REGISTRY= IMAGE_REMOTES= ./deploy.sh "$p" --dry-run >/dev/null   # upstream image names
 done
 
-mkdir -p .cache/crds
-log "fetching InferencePool CRDs"
-curl -fsSL "$INFERENCE_CRDS_URL" -o .cache/crds/inference-extension-v1.yaml
-if [[ -n $ROUTER_CRDS ]]; then
-  log "fetching llm-d-router CRDs"
-  curl -fsSL "$ROUTER_CRDS_URL" -o .cache/crds/llm-d-router.yaml
-  # CRDs only: anything else would carry images that are not in the lock
-  [[ $(yq -N '.kind' .cache/crds/llm-d-router.yaml | grep -v '^---$' | sort -u) == CustomResourceDefinition ]] ||
-    die "$ROUTER_CRDS_URL holds more than CRDs"
+if step sources; then
+  mkdir -p .cache/crds
+  log "fetching InferencePool CRDs"
+  curl -fsSL "$INFERENCE_CRDS_URL" -o .cache/crds/inference-extension-v1.yaml
+  if [[ -n $ROUTER_CRDS ]]; then
+    log "fetching llm-d-router CRDs"
+    curl -fsSL "$ROUTER_CRDS_URL" -o .cache/crds/llm-d-router.yaml
+    # CRDs only: anything else would carry images that are not in the lock
+    [[ $(yq -N '.kind' .cache/crds/llm-d-router.yaml | grep -v '^---$' | sort -u) == CustomResourceDefinition ]] ||
+      die "$ROUTER_CRDS_URL holds more than CRDs"
+  fi
 fi
+
+if ! step images; then
+  mkdir -p "$OUT"
+  TAR=$OUT/llm-d-sources-${LLMD_REF:0:7}-$(date +%Y%m%d).tar.gz
+  log "packing $TAR"
+  tar -czf "$TAR" --exclude="./$OUT" --exclude='./.git' --exclude='./.build' -C "$ROOT" .
+  log "done: $TAR; on the registry machine: unpack into pipeline/, then BUNDLE_STEPS=images ./bundle.sh"
+  exit 0
+fi
+[[ -f .cache/crds/inference-extension-v1.yaml ]] || die "no .cache/crds/: run BUNDLE_STEPS=sources ./bundle.sh first and unpack its tarball here"
+[[ -z $ROUTER_CRDS || -f .cache/crds/llm-d-router.yaml ]] || die "ROUTER_CRDS=1 but no .cache/crds/llm-d-router.yaml: run the sources step with ROUTER_CRDS=1"
 
 # ---- 2. lock image digests ------------------------------------------------------------------
 IMAGES=$( { for p in "${PROFILES[@]}"; do n=$(./deploy.sh "$p" --name)

@@ -131,6 +131,10 @@ for p in profiles/tiered-cpu-gke.yaml profiles/wide-ep-gke.yaml; do
 done
 echo "ok  model swap inside script-form overlays"
 
+# bundle.sh split: an unknown step is refused before any network access
+! BUNDLE_STEPS=bogus ./bundle.sh >/dev/null 2>&1 || fail bundle "BUNDLE_STEPS=bogus should fail"
+echo "ok  bundle.sh rejects unknown BUNDLE_STEPS"
+
 # air-gapped mode (needs .cache/images.lock from ./bundle.sh): every image -> registry, pinned by digest
 if [[ -f .cache/images.lock ]]; then
   for p in profiles/*.yaml; do

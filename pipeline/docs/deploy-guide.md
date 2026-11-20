@@ -235,6 +235,20 @@ set -a; source envs/prod.env; set +a        # IMAGE_REGISTRY + IMAGE_TEMPLATE fi
 | `dist/images-to-mirror.tsv` | **what to copy into GAR**: `repo@digest <tab> target <tab> original repo:tag` for every locked image |
 | `dist/llm-d-bundle-<sha>-<date>.tar.gz` | this directory including `.cache/`; carry it into the air gap |
 
+**Split across two machines.** If one machine reaches GitHub and another reaches the image registries, run the two halves separately with `BUNDLE_STEPS`:
+
+```bash
+# machine A (GitHub, ghcr.io charts): llm-d guides, router charts, CRDs -> dist/llm-d-sources-<sha>-<date>.tar.gz
+BUNDLE_STEPS=sources ./bundle.sh profiles/<it>.yaml
+
+# machine B (docker.io, ghcr.io, gcr.io via docker buildx): no GitHub needed
+tar -xzf llm-d-sources-<sha>-<date>.tar.gz -C pipeline && cd pipeline
+set -a; source envs/prod.env; set +a
+BUNDLE_STEPS=images ./bundle.sh profiles/<it>.yaml     # digests, mirror list, final llm-d-bundle tarball
+```
+
+Pass the same profiles on both machines (add `ROUTER_CRDS=1` to the sources step if you need it). Machine B renders from the unpacked `.cache/`; if something is missing it stops with "no network? run ./bundle.sh on a connected machine". It also stops if the CRDs from the sources step are missing. Carry the **final** `llm-d-bundle-*` tarball into the air gap, not the sources one: only the final one has `.cache/images.lock`.
+
 ### 2.1 Mirror the images into GAR
 
 > **Using Artifact Registry remote repos?** Set `IMAGE_REMOTES` (one `host=<repo>` per upstream: `docker.io`, `ghcr.io`, `gcr.io`, `quay.io`) in the env file for both `bundle.sh` and `deploy.sh`. Those images are pulled through the remote repos by digest and drop off the mirror list, so with all four hosts mapped you can skip this section and 2.2. The node service account needs `roles/artifactregistry.reader` on those repos.
