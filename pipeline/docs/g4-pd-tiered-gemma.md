@@ -42,20 +42,67 @@ Per node the pods request 2 GPUs, 24 vCPU and 204Gi RAM (prefill 140Gi + decode 
 
 ## 1. Check the cluster
 
+### 1.1 Prerequisites: CRDs
+
+The render applies one `DisaggregatedSet`, one `InferencePool` and one `HTTPRoute` (plus a Deployment, Service, ConfigMap and RBAC for the EPP). These CRDs must exist before `deploy.sh` runs:
+
+| CRD | API group | Comes from | Install |
+| --- | --- | --- | --- |
+| `leaderworkersets` | `leaderworkerset.x-k8s.io` | LWS ≥ v0.11.1 | [deploy-guide 1.4](deploy-guide.md#14-leaderworkerset-only-for-pd-and-wide-ep) (`lws/crds`) |
+| `disaggregatedsets` | `disaggregatedset.x-k8s.io` | LWS, only with `--set enableDisaggregatedSet=true` | same step |
+| `inferencepools` | `inference.networking.k8s.io` (v1) | Gateway API Inference Extension | managed by GKE ≥ 1.34.0-gke.1626000 with Gateway API on; else `kubectl apply -f .cache/crds/inference-extension-v1.yaml` ([1.2](deploy-guide.md#12-gateway-api-and-inferencepool-crds)) |
+| `gateways`, `httproutes`, `gatewayclasses` | `gateway.networking.k8s.io` (v1) | Gateway API | GKE with Gateway API enabled |
+| agentgateway CRDs | agentgateway's own | `agentgateway-crds` chart v1.1.0 | [1.3](deploy-guide.md#13-a-gateway-pick-one) |
+
+**Not needed:** the llm-d-router CRDs (`InferenceObjective`, `ROUTER_CRDS=1`, only for flow-control priorities), DRA / `resource.k8s.io` device classes and RDMA NIC drivers (only the `gke` RDMA overlay uses them).
+
+### 1.2 Prerequisites: images
+
+What the rendered manifests run, with the digests `bundle.sh` locked (`.cache/images.lock`, llm-d ref `565373b`). `deploy.sh` pins each to its digest, so the moving `:main` / `:slim` tags are safe:
+
+| Image | Used by | Digest |
+| --- | --- | --- |
+| `docker.io/vllm/vllm-openai:v0.34.0` | prefill + decode `modelserver` | `sha256:20fdb089454afbb324efa4110a2c025ff7b27cc1a086e07aa580b18df8ad1ce1` |
+| `ghcr.io/llm-d/llm-d-router-disagg-sidecar:main` | decode `routing-proxy` (P/D sidecar) | `sha256:c2c5bc442819f5e02e6bd0d03a95f11182bbbb65fb60e58aca87ba7baff8fe09` |
+| `ghcr.io/llm-d/llm-d-router-endpoint-picker:main` | EPP (router) | `sha256:9be34ab3363517ed3b5c9ca368fb76cb1449228e3fee48c875a3942239653f0c` |
+| `gcr.io/google.com/cloudsdktool/google-cloud-cli:slim` | `fetch-model` init (weights from GCS) | `sha256:6795669175125b3556f19ebd3ba4ff2d1ae01d51b72af920c4573c372a52ef2d` |
+| `docker.io/curlimages/curl:8.11.1` | `deploy.sh` smoke test pod | `sha256:c1fe1679c34d9784c1b0d1e5f62ac0a79fca01fb6377cdd33e90473c6f9f9a69` |
+
+Re-running `bundle.sh` later can lock newer digests for `:main` / `:slim`; `.cache/images.lock` is the source of truth. Print the list for your bundle with:
+
+```bash
+./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-agentgateway.yaml --dry-run
+for f in .build/gemma-4-31b-it-pd-tiered-g4-vllm/{modelserver,router}.yaml; do
+  yq -N '.. | select(tag == "!!map" and has("image")) | .image' "$f"; done | sort -u
+```
+
+Air-gapped, the cluster add-ons need their own images mirrored too. `bundle.sh` does not cover them. List them from the charts on the connected machine:
+
+```bash
+helm template lws oci://registry.k8s.io/lws/charts/lws --version 1.0.0 --set enableDisaggregatedSet=true | grep -E '^\s+image:' | sort -u
+helm template agentgateway oci://cr.agentgateway.dev/charts/agentgateway --version v1.1.0 --set inferenceExtension.enabled=true | grep -E '^\s+image:' | sort -u
+```
+
+The model weights are not an image: `fetch-model` copies `gs://models_registry/google__gemma_4_31b_it/` (~63 GB) to each node's local SSD.
+
+### 1.3 Check the cluster
+
 Do the one-time setup in [deploy-guide.md §1](deploy-guide.md#1-one-time-cluster-setup) first: InferencePool CRD (1.2), a Gateway (1.3, this profile uses agentgateway), **LWS with `enableDisaggregatedSet=true` (1.4)**, namespace + ServiceAccount + Workload Identity (1.5). Then check:
 
 ```bash
 kubectl config current-context                         # must be the G4 cluster, not kind
 kubectl get nodes -l node.kubernetes.io/instance-type=g4-standard-96 \
   -o custom-columns=NODE:.metadata.name,GPU:.status.allocatable.nvidia\\.com/gpu,MEM:.status.allocatable.memory,EPH:.status.allocatable.ephemeral-storage
-kubectl get crd inferencepools.inference.networking.k8s.io leaderworkersets.leaderworkerset.x-k8s.io disaggregatedsets.disaggregatedset.x-k8s.io
+kubectl get crd inferencepools.inference.networking.k8s.io leaderworkersets.leaderworkerset.x-k8s.io disaggregatedsets.disaggregatedset.x-k8s.io \
+  gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io
+kubectl get gatewayclass agentgateway
 kubectl -n lws-system get deploy                       # LWS >= v0.11.1
 kubectl -n agentgateway-system get gateway llm-d-inference-gateway
 kubectl -n llm-d get sa llm-d-modelserver
 gcloud storage ls gs://models_registry/google__gemma_4_31b_it/ | head   # weights where the profile expects them
 ```
 
-Expected: 3 nodes, `GPU` = 2 on each, ephemeral storage well above ~63 GB (weights are cached on local SSD once per node), all three CRDs present.
+Expected: 3 nodes, `GPU` = 2 on each, ephemeral storage well above ~63 GB (weights are cached on local SSD once per node), all five CRDs and the `agentgateway` GatewayClass present.
 
 ---
 
@@ -206,15 +253,15 @@ To prove the test catches the main mistake, switch the overlay to `.../vllm/gke`
 
 ## 4. Bundle the images (connected machine)
 
-Air-gapped clusters only. The profile needs `vllm/vllm-openai:v0.34.0`, the P/D routing sidecar (`llm-d-router-disagg-sidecar`), the EPP and the `fetch-model` image:
+Air-gapped clusters only. `bundle.sh` locks and lists the five images from [1.2](#12-prerequisites-images) and caches the InferencePool CRD and router chart:
 
 ```bash
 set -a; source envs/prod.env; set +a
 ./bundle.sh profiles/gemma-4-31b-pd-tiered-g4-agentgateway.yaml
-grep -E 'vllm-openai:v0.34.0|disagg-sidecar' .cache/images.lock             # both locked by digest
+grep -E 'vllm-openai:v0.34.0|disagg-sidecar|endpoint-picker:main|google-cloud-cli:slim|curl:8.11.1' .cache/images.lock   # 5 rows
 ```
 
-Mirror the new rows of `dist/images-to-mirror.tsv` (or use `IMAGE_REMOTES`), as in [deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine). The P/D component needs no extra CRDs beyond LWS; `ROUTER_CRDS=1` is not needed.
+Mirror the new rows of `dist/images-to-mirror.tsv` (or use `IMAGE_REMOTES`), as in [deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine). Mirror the LWS and agentgateway images from [1.2](#12-prerequisites-images) separately. `ROUTER_CRDS=1` is not needed.
 
 ---
 
