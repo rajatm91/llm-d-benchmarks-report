@@ -218,6 +218,7 @@ Re-tune these whenever you combine paths:
 | `tiered-cpu-gke.yaml` | Tiered prefix cache (CPU) | GKE |
 | `pd-gke.yaml` | P/D | GKE |
 | `pd-tiered-cpu-agentgateway.yaml` | **P/D + tiered CPU** (combo) | agentgateway |
+| `gemma-4-31b-pd-tiered-g4-gke.yaml` | Gemma 4 31B **P/D + tiered CPU** on 3 × g4-standard-96 (no RDMA: `base` overlay + `combos/g4-pd-sizing`); see [docs/g4-pd-tiered-gemma.md](docs/g4-pd-tiered-gemma.md) | GKE |
 | `wide-ep-gke.yaml` | Wide-EP (+ P/D) | GKE |
 | `wide-ep-pd-tiered-glm-agentgateway.yaml` | **Wide-EP + P/D + CPU/NVMe tiered** (upstream composition) | agentgateway |
 
