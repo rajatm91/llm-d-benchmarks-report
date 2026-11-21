@@ -1,0 +1,57 @@
+# Sizes the P/D DisaggregatedSet for 3 x g4-standard-96 (2 x RTX PRO 6000 96 GB per node, no RDMA NICs).
+# Layer on guides/pd-disaggregation/modelserver/gpu/vllm/base (NOT .../gke: that one asks DRA for
+# mrdma.google.com NICs, which G4 does not have, so the pods would never schedule).
+#
+#   3 slices x (1 prefill TP=1 + 1 decode TP=1); ExclusiveSlice on hostname puts one slice per node,
+#   so each node runs 1 prefill + 1 decode and the 140Gi prefill (CPU tier) pods never stack.
+#   NIXL falls back to TCP between nodes; same-node pairs use CUDA IPC.
+#   Decode rolls with maxSurge 0: all 6 GPUs are in use, there is no spare one to surge onto.
+#
+# Needs guides/recipes/modelserver/components/disaggregatedset-schema listed BEFORE this component.
+# Args are patched by index; the `test` ops fail the render if upstream reorders them.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target: {kind: DisaggregatedSet, name: pd-disagg-vllm}
+    patch: |-
+      - op: replace
+        path: /spec/slices
+        value: 3
+      - op: add
+        path: /spec/placementPolicy
+        value: {type: ExclusiveSlice, topology: kubernetes.io/hostname}
+      - op: test
+        path: /spec/roles/1/name
+        value: decode
+      - op: test
+        path: /spec/roles/1/spec/leaderWorkerTemplate/workerTemplate/spec/containers/0/args/2
+        value: --tensor-parallel-size=4
+      - op: replace
+        path: /spec/roles/1/spec/leaderWorkerTemplate/workerTemplate/spec/containers/0/args/2
+        value: --tensor-parallel-size=1
+      - op: replace
+        path: /spec/roles/1/spec/leaderWorkerTemplate/workerTemplate/spec/containers/0/resources/limits/nvidia.com~1gpu
+        value: "1"
+      - op: replace
+        path: /spec/roles/1/spec/leaderWorkerTemplate/workerTemplate/spec/containers/0/resources/requests/nvidia.com~1gpu
+        value: "1"
+      - op: replace
+        path: /spec/roles/1/spec/rolloutStrategy/rollingUpdateConfiguration
+        value: {maxSurge: 0, maxUnavailable: 1}
+  # GKE taints GPU nodes; the base overlay (unlike gke) carries no toleration.
+  - patch: |-
+      apiVersion: disaggregatedset.x-k8s.io/v1
+      kind: DisaggregatedSet
+      metadata:
+        name: pd-disagg-vllm
+      spec:
+        roles:
+          - name: prefill
+            spec: &g4
+              leaderWorkerTemplate:
+                workerTemplate:
+                  spec:
+                    tolerations:
+                      - {key: nvidia.com/gpu, operator: Exists, effect: NoSchedule}
+          - name: decode
+            spec: *g4

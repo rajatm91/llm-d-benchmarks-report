@@ -41,6 +41,7 @@ These describe the target, not the model, so they live in `envs/<env>.env` (copy
 | `IMAGE_REMOTES` | unset | deploy, bundle | Artifact Registry remote repos, one per upstream host: `'docker.io=<repo> ghcr.io=<repo> gcr.io=<repo> quay.io=<repo>'`. Images from a listed host become `<repo>/<upstream path>@<digest>` and are left off the mirror list. Other hosts use `IMAGE_REGISTRY`. |
 | `IMAGE_TEMPLATE` | `{registry}/{host}/{path}@{digest}` | deploy, bundle | Layout inside `IMAGE_REGISTRY`. Placeholders: `{registry} {host} {path} {name} {tag} {digest}` ([`lib/images.sh`](../lib/images.sh)). Must be the same for bundle and deploy. |
 | `OUT` | `dist` | bundle | Where the tarball and mirror list go. |
+| `BUNDLE_STEPS` | `sources images` | bundle | `sources` = guides, charts, CRDs (GitHub) packed as `llm-d-sources-*.tar.gz`; `images` = digests, mirror list, final bundle from an existing `.cache/` (registries only). Split across two machines. |
 | `INFERENCE_CRDS_URL` | GAIE `releases/latest/.../v1-manifests.yaml` | bundle | InferencePool CRDs cached into `.cache/crds/`. |
 | `ROUTER_CRDS` | unset | bundle | `1` = also cache the llm-d-router CRDs (`InferenceObjective`, `InferenceModelRewrite`) as `.cache/crds/llm-d-router.yaml`. Needed for flow-control priorities. |
 | `ROUTER_CRDS_URL` | llm-d-router `releases/download/v1.0.0/manifests.yaml` | bundle | Where those come from. Must hold CRDs only. |

@@ -90,6 +90,15 @@ role() { yq -N "select(.kind==\"DisaggregatedSet\") | .spec.roles[] | select(.na
 [[ $(role decode '.containers[0].args[8]') != *Offloading* ]] || fail pd-tiered "decode should not offload"
 [[ $(role prefill '.volumes[] | select(.name=="shm") | .emptyDir.sizeLimit') == 110Gi ]] || fail pd-tiered "shm not resized"
 [[ $(role prefill '.volumes | length') == $(role decode '.volumes | length') ]] || fail pd-tiered "prefill lost volumes during merge"
+# G4 sizing: plain nvidia.com/gpu (no RDMA DRA claims), 1 GPU / TP=1 per role, one slice per node, offload on prefill
+B=.build/$(./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-agentgateway.yaml --name)/modelserver.yaml
+[[ -z $(yq -N 'select(.kind=="ResourceClaimTemplate") | .metadata.name' "$B") && -z $(role prefill '.resourceClaims // ""') ]] || fail pd-g4 "G4 has no RDMA NICs: no DRA claims allowed"
+for r in prefill decode; do
+  [[ $(role $r '.containers[] | select(.name=="modelserver") | .resources.limits."nvidia.com/gpu"') == 1 ]] || fail pd-g4 "$r must request 1 GPU"
+  [[ $(role $r '.containers[] | select(.name=="modelserver") | .args[]' | grep -c -- '--tensor-parallel-size=1') == 1 ]] || fail pd-g4 "$r must run TP=1"
+done
+[[ $(role prefill '.containers[] | select(.name=="modelserver") | .args[]') == *OffloadingConnector* ]] || fail pd-g4 "prefill lost the CPU tier"
+[[ $(yq -N 'select(.kind=="DisaggregatedSet") | (.spec.slices | tostring) + " " + .spec.placementPolicy.topology' "$B") == "3 kubernetes.io/hostname" ]] || fail pd-g4 "want 3 slices, one per node"
 W=.build/$(./deploy.sh profiles/wide-ep-gke.yaml --name)/router.yaml
 [[ $(yq -N 'select(.kind=="InferencePool") | .spec.targetPorts | length' "$W") == 8 ]] || fail wide-ep "pool must target all 8 DP rank ports"
 # modelserver.image: replaces the vLLM containers' image only; sidecars / init / helper containers keep theirs
@@ -121,6 +130,10 @@ for p in profiles/tiered-cpu-gke.yaml profiles/wide-ep-gke.yaml; do
   done <<<"$cmds"
 done
 echo "ok  model swap inside script-form overlays"
+
+# bundle.sh split: an unknown step is refused before any network access
+! BUNDLE_STEPS=bogus ./bundle.sh >/dev/null 2>&1 || fail bundle "BUNDLE_STEPS=bogus should fail"
+echo "ok  bundle.sh rejects unknown BUNDLE_STEPS"
 
 # air-gapped mode (needs .cache/images.lock from ./bundle.sh): every image -> registry, pinned by digest
 if [[ -f .cache/images.lock ]]; then
