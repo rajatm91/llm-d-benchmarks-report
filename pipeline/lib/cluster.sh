@@ -11,6 +11,8 @@ preflight() {
     die "ServiceAccount $NAMESPACE/$ROUTER_SERVICE_ACCOUNT not found (ROUTER_SERVICE_ACCOUNT: the router EPP runs as this pre-existing SA)"
   has_crd inferencepools.inference.networking.k8s.io ||
     die "InferencePool CRD missing. Install: kubectl apply -f $ROOT/.cache/crds/inference-extension-v1.yaml (from bundle.sh), or let GKE >=1.34.0-gke.1626000 with Gateway API enabled manage it"
+  ! yq -e 'select(.kind == "PodMonitoring")' "$MS" "$ROUTER" >/dev/null 2>&1 || has_crd podmonitorings.monitoring.googleapis.com ||
+    die "MONITORING=gmp but the PodMonitoring CRD is missing: enable Managed Service for Prometheus on the cluster (gcloud container clusters update <c> --enable-managed-prometheus)"
   if yq -e 'select(.kind == "InferenceObjective")' "$ROUTER" >/dev/null 2>&1; then
     has_crd inferenceobjectives.llm-d.ai ||
       die "InferenceObjective CRD missing (router.inferenceObjectives). Install: kubectl apply -f $ROOT/.cache/crds/llm-d-router.yaml (from ROUTER_CRDS=1 ./bundle.sh)"

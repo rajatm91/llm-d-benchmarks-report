@@ -33,7 +33,9 @@ These describe the target, not the model, so they live in `envs/<env>.env` (copy
 | `KUBECONFIG` | kubectl's default | deploy | Which cluster. `deploy.sh` uses the current context. |
 | `NAMESPACE` | `llm-d` | deploy | Shared namespace for all models. Must exist. |
 | `SERVICE_ACCOUNT` | `llm-d-modelserver` | deploy | Pre-existing SA the model-server pods run as. Needs read access to the bucket. |
-| `ROUTER_SERVICE_ACCOUNT` | unset | deploy | Run the router EPP as this pre-existing ServiceAccount instead of the chart's `<name>-epp`: the chart's ServiceAccount is dropped and the EPP Deployment and its Role/ClusterRole bindings point here. Preflight checks it exists. |
+| `ROUTER_SERVICE_ACCOUNT` | unset | deploy | Run the router EPP as this pre-existing ServiceAccount instead of the chart's `<name>-epp`: the chart's `<name>-epp` ServiceAccount is dropped and the EPP Deployment and its Role/ClusterRole bindings point here. Preflight checks it exists. |
+| `MONITORING` | unset | deploy | `gmp` = GKE Managed Prometheus `PodMonitoring`: `<name>-modelserver` scrapes `/metrics` on every vLLM container port (one per DP rank on wide-EP; not `nixl`/`supervisor`), and `<name>-epp` scrapes the EPP's `metrics` port. The EPP runs with `--metrics-endpoint-auth=false` (router chart `monitoring.prometheus.auth.enabled=false`), so no token ServiceAccount, Secret or cluster RBAC is created. Preflight checks the `podmonitorings.monitoring.googleapis.com` CRD. |
+| `MONITORING_INTERVAL` | `15s` | deploy | Scrape interval for both. |
 | `MODEL_BUCKET` | `gs://models_registry` | deploy | Where garuda stores weights, one folder per model. |
 | `MODEL_CACHE_PATH` | `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models` | deploy | hostPath on each node that caches weights (GKE local SSD). |
 | `DOWNLOADER_IMAGE` | `gcr.io/google.com/cloudsdktool/google-cloud-cli:slim` | deploy, bundle | Image of the init container that copies weights from GCS. |
