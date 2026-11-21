@@ -7,6 +7,8 @@ preflight() {
   kubectl get namespace "$NAMESPACE" >/dev/null 2>&1 || die "namespace $NAMESPACE not found (shared namespace is pre-created)"
   kubectl get serviceaccount "$SERVICE_ACCOUNT" -n "$NAMESPACE" >/dev/null 2>&1 ||
     die "ServiceAccount $NAMESPACE/$SERVICE_ACCOUNT not found (model-server pods run as this pre-existing SA)"
+  [[ -z $ROUTER_SERVICE_ACCOUNT ]] || kubectl get serviceaccount "$ROUTER_SERVICE_ACCOUNT" -n "$NAMESPACE" >/dev/null 2>&1 ||
+    die "ServiceAccount $NAMESPACE/$ROUTER_SERVICE_ACCOUNT not found (ROUTER_SERVICE_ACCOUNT: the router EPP runs as this pre-existing SA)"
   has_crd inferencepools.inference.networking.k8s.io ||
     die "InferencePool CRD missing. Install: kubectl apply -f $ROOT/.cache/crds/inference-extension-v1.yaml (from bundle.sh), or let GKE >=1.34.0-gke.1626000 with Gateway API enabled manage it"
   if yq -e 'select(.kind == "InferenceObjective")' "$ROUTER" >/dev/null 2>&1; then
@@ -33,12 +35,21 @@ preflight_gateway() {
       die "Gateway listeners only allow routes from: $from. Set allowedRoutes.namespaces.from: All (or a Selector matching $NAMESPACE)"
     [[ $from == *All* ]] || log "WARN: Gateway uses a namespace Selector; make sure namespace $NAMESPACE matches it"
   fi
-  # Two catch-all "/" routes on one Gateway conflict (oldest wins). Shared gateways need BASE_MODEL.
-  others=$(kubectl get httproute -A -o yaml | GW=$GATEWAY_NAME NAME=$NAME NS=$NAMESPACE yq -N '.items[]
+  # Our route is a catch-all (PathPrefix "/"). Another catch-all on the same Gateway conflicts (oldest wins);
+  # routes on specific paths (/optimized-baseline) or with header matches coexist (longest match wins).
+  [[ -n $BASE_MODEL ]] && return 0
+  others=$(kubectl get httproute -A -o yaml | catchall_routes)
+  [[ -z $others ]] ||
+    die "Gateway already has catch-all \"/\" routes ($(tr '\n' ' ' <<<"$others")); set gateway.baseModel and install IPP so routes match on X-Gateway-Base-Model-Name"
+}
+# catchall_routes < HTTPRouteList: ns/name of other routes on $GATEWAY_NAME that match every request
+# (a rule with no matches, or a match on path "/" without headers)
+catchall_routes() {
+  GW=$GATEWAY_NAME NAME=$NAME NS=$NAMESPACE yq -N '.items[]
     | select(.spec.parentRefs[].name == strenv(GW))
-    | select(.metadata.name != strenv(NAME) or .metadata.namespace != strenv(NS)) | .metadata.namespace + "/" + .metadata.name' | sort -u)
-  [[ -z $others || -n $BASE_MODEL ]] ||
-    die "Gateway already has routes ($(tr '\n' ' ' <<<"$others")); set BASE_MODEL and install IPP so routes match on X-Gateway-Base-Model-Name"
+    | select(.metadata.name != strenv(NAME) or .metadata.namespace != strenv(NS))
+    | select([.spec.rules[] | (.matches // [{}])[] | select((.path.value // "/") == "/" and ((.headers // []) | length) == 0)] | length > 0)
+    | .metadata.namespace + "/" + .metadata.name' | sort -u
 }
 
 # The chart has no hooks or lookups, so its render is exactly what helm would install: apply the

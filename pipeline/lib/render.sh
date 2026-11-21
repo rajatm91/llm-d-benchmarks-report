@@ -187,7 +187,26 @@ render_router() {
   log "rendering router ($chart:$ROUTER_CHART_VERSION, pool selector llm-d.ai/deployment=$NAME)"
   helm template "$NAME" "$dir" "${args[@]}" > "$ROUTER"
   # label everything the router render creates, so it can be found / deleted as one unit
-  NAME=$NAME yq -i '.metadata.labels."llm-d.ai/deployment" = strenv(NAME)' "$ROUTER"
+  # (objects only: helm emits empty "---" documents for templates that render nothing; labelling those
+  #  would turn them into kind-less objects that kubectl apply rejects: "apiVersion not set, kind not set")
+  NAME=$NAME yq -i '(select(.kind != null) | .metadata.labels."llm-d.ai/deployment") = strenv(NAME)' "$ROUTER"
+  use_router_sa
+}
+
+# ROUTER_SERVICE_ACCOUNT: run the EPP as a pre-existing ServiceAccount. The chart has no option for it, so
+# drop the chart's ServiceAccount and point the Deployment and every RBAC binding subject at the given one.
+# The chart's Roles/ClusterRole are still created and bound to it (the EPP needs them).
+use_router_sa() {
+  [[ -n $ROUTER_SERVICE_ACCOUNT ]] || return 0
+  local old; old=$(yq -N 'select(.kind == "ServiceAccount") | .metadata.name' "$ROUTER")
+  [[ -n $old && $(wc -l <<<"$old") -eq 1 ]] || die "router render has $(wc -l <<<"$old" | tr -d ' ') ServiceAccounts ($(echo $old)); expected one to replace with $ROUTER_SERVICE_ACCOUNT"
+  log "router runs as existing ServiceAccount $ROUTER_SERVICE_ACCOUNT (not creating $old)"
+  OLD=$old yq -i 'select(.kind != "ServiceAccount" or .metadata.name != strenv(OLD))' "$ROUTER"
+  OLD=$old SA=$ROUTER_SERVICE_ACCOUNT yq -i '
+    (.. | select(tag == "!!map" and .serviceAccountName == strenv(OLD)) | .serviceAccountName) = strenv(SA) |
+    ((.subjects // [])[] | select(.kind == "ServiceAccount" and .name == strenv(OLD)) | .name) = strenv(SA)' "$ROUTER"
+  ! grep -qw -- "$old" <(yq -N '.. | select(tag == "!!map") | (.serviceAccountName // ""), ((.subjects // [])[] | select(.kind == "ServiceAccount") | .name)' "$ROUTER") ||
+    die "router render still refers to ServiceAccount $old"
 }
 
 # Air-gapped (IMAGE_REGISTRY and/or IMAGE_REMOTES set): every image -> its remote repo, or IMAGE_REGISTRY

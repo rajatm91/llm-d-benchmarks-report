@@ -25,6 +25,9 @@ for p in profiles/*.yaml; do
     [[ $NAME =~ ^[a-z0-9-]+-${STRATEGY}-(vllm|sglang|trtllm)$ ]] || fail "$NAME" "name does not follow <model>-<strategy>-<engine>"
     ./deploy.sh "$p" --dry-run >/dev/null 2>&1 || fail "$NAME" "render failed: ./deploy.sh $p --dry-run"
     B=.build/$NAME
+    # kubectl apply rejects documents without apiVersion/kind ("apiVersion not set, kind not set")
+    bad=$(yq -N 'select(. != null and (.kind == null or .apiVersion == null)) | document_index' "$B/modelserver.yaml" "$B/router.yaml")
+    [[ -z $bad ]] || fail "$NAME" "render has documents without apiVersion/kind (index $(echo $bad))"
     # pre-existing ServiceAccount only
     [[ -z $(yq -N 'select(.kind == "ServiceAccount") | .metadata.name' "$B/modelserver.yaml") ]] || fail "$NAME" "renders its own ServiceAccount"
     sas=$(yq -N '.. | select(tag == "!!map" and has("serviceAccountName")) | .serviceAccountName' "$B/modelserver.yaml" | sort -u)
@@ -167,6 +170,15 @@ if [[ -f .cache/charts/lws-1.0.0/Chart.yaml ]] && grep -q '^registry.k8s.io/lws/
   echo "ok  install-lws.sh maps and pins the LWS image"
 fi
 for f in -h --help; do [[ $(./install-lws.sh $f) == *"./install-lws.sh --env-file dev --dry-run"* ]] || fail install-lws "$f"; done
+
+# ROUTER_SERVICE_ACCOUNT: no ServiceAccount rendered; EPP Deployment and all binding subjects use the given one
+P=profiles/gemma-4-31b-pd-tiered-g4-gke.yaml; n=$(./deploy.sh "$P" --name)
+ROUTER_SERVICE_ACCOUNT=existing-sa ./deploy.sh "$P" --dry-run >/dev/null 2>&1 || fail router-sa "render failed"
+R=.build/$n/router.yaml
+[[ -z $(yq -N 'select(.kind == "ServiceAccount") | .metadata.name' "$R") ]] || fail router-sa "router still renders a ServiceAccount"
+[[ $(yq -N '.. | select(tag == "!!map") | (select(has("serviceAccountName")) | .serviceAccountName), ((.subjects // [])[] | select(.kind == "ServiceAccount") | .name)' "$R" | sort -u) == existing-sa ]] ||
+  fail router-sa "EPP or a binding does not use existing-sa"
+echo "ok  ROUTER_SERVICE_ACCOUNT reuses an existing ServiceAccount"
 
 # bundle.sh split: an unknown step is refused before any network access
 ! BUNDLE_STEPS=bogus ./bundle.sh >/dev/null 2>&1 || fail bundle "BUNDLE_STEPS=bogus should fail"
