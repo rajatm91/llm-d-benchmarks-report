@@ -160,6 +160,10 @@ if [[ -f .cache/charts/lws-1.0.0/Chart.yaml ]] && grep -q '^registry.k8s.io/lws/
   [[ $out == *"image.manager.repository=reg.test/k8s/lws/lws"* && $out == *"image.manager.tag=v1.0.0@sha256:"* &&
      $out == *"enableDisaggregatedSet=true"* && $out == *"-f .cache/charts/lws-1.0.0/crds"* ]] || fail install-lws "dry run wrong: $out"
   ! IMAGE_REGISTRY= IMAGE_REMOTES='docker.io=x' ./install-lws.sh --dry-run >/dev/null 2>&1 || fail install-lws "unmapped registry.k8s.io should fail"
+  # macOS AppleDouble files (._x, binary) in a chart break helm; install-lws.sh drops them first
+  printf '\x00\x05\x16\x07Mac OS X' > .cache/charts/lws-1.0.0/templates/._appledouble.yaml
+  IMAGE_REGISTRY= IMAGE_REMOTES='registry.k8s.io=reg.test/k8s' ./install-lws.sh --dry-run >/dev/null 2>&1 &&
+    [[ ! -e .cache/charts/lws-1.0.0/templates/._appledouble.yaml ]] || fail install-lws "._* file in the chart not handled"
   echo "ok  install-lws.sh maps and pins the LWS image"
 fi
 for f in -h --help; do [[ $(./install-lws.sh $f) == *"./install-lws.sh --env-file dev --dry-run"* ]] || fail install-lws "$f"; done

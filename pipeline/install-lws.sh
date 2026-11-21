@@ -29,6 +29,7 @@ LWS_VERSION=${LWS_VERSION:-1.0.0}
 IMAGE_REGISTRY=${IMAGE_REGISTRY:-}
 DIR=.cache/charts/lws-$LWS_VERSION
 [[ -f $DIR/Chart.yaml ]] || die "no $DIR: run LWS_CHART=1 ./bundle.sh on the connected side and unpack its tarball here"
+drop_mac_junk "$DIR"
 SET=(--set enableDisaggregatedSet=true)
 
 img=$(helm template lws "$DIR" "${SET[@]}" | yq -N '.. | select(tag == "!!map" and has("image")) | .image' | sort -u)
