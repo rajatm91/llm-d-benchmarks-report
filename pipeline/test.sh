@@ -186,6 +186,17 @@ for p in profiles/gemma-4-31b-pd-tiered-g4-gke.yaml profiles/tiered-cpu-gke.yaml
 done
 echo "ok  modelserver.args with repeated flags, list- and script-form overlays"
 
+# gateway.timeoutSec: GCPBackendPolicy timeoutSec on GKE (chart hard-codes 300), HTTPRoute timeout elsewhere
+yq '.gateway.timeoutSec = 900' profiles/gemma-4-31b-pd-tiered-g4-gke.yaml > "$T/to.yaml"; n=$(./deploy.sh "$T/to.yaml" --name)
+./deploy.sh "$T/to.yaml" --dry-run >/dev/null 2>&1 || fail timeout "render failed"
+[[ $(yq -N 'select(.kind == "GCPBackendPolicy") | .spec.default.timeoutSec' ".build/$n/router.yaml" | sort -u) == 900 ]] || fail timeout "GCPBackendPolicy timeoutSec not 900"
+yq '.gateway.timeoutSec = 900' profiles/pd-tiered-cpu-agentgateway.yaml > "$T/to.yaml"; n=$(./deploy.sh "$T/to.yaml" --name)
+./deploy.sh "$T/to.yaml" --dry-run >/dev/null 2>&1 || fail timeout "agentgateway render failed"
+[[ $(yq -N 'select(.kind == "HTTPRoute") | .spec.rules[0].timeouts.request' ".build/$n/router.yaml") == 900s ]] || fail timeout "HTTPRoute timeout not 900s"
+yq '.gateway.timeoutSec = "15m"' profiles/gemma-4-31b-pd-tiered-g4-gke.yaml > "$T/to.yaml"
+! ./deploy.sh "$T/to.yaml" --dry-run >/dev/null 2>&1 || fail timeout "non-numeric timeoutSec should fail"
+echo "ok  gateway.timeoutSec"
+
 # ROUTER_SERVICE_ACCOUNT: no ServiceAccount rendered; EPP Deployment and all binding subjects use the given one
 P=profiles/gemma-4-31b-pd-tiered-g4-gke.yaml; n=$(./deploy.sh "$P" --name)
 ROUTER_SERVICE_ACCOUNT=existing-sa ./deploy.sh "$P" --dry-run >/dev/null 2>&1 || fail router-sa "render failed"

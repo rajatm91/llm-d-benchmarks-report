@@ -773,7 +773,7 @@ pipeline {
 
 ## Appendix: reference
 
-**Profile keys:** `model`, `strategy`, `modelAlias`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas, image}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel}`, `weights.gcsUri`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
+**Profile keys:** `model`, `strategy`, `modelAlias`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas, image}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel, timeoutSec}`, `weights.gcsUri`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
 
 **Environment** (the same for every model, set by Jenkins):
 

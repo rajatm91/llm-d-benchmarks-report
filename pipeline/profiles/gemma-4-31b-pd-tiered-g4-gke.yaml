@@ -22,3 +22,4 @@ gateway:
   provider: gke                           # renders HealthCheckPolicy + GCPBackendPolicy (else every request 503s)
   name: llm-d-gemma-gateway               # its own Gateway: another model already owns "/" on llm-d-inference-gateway
   # no namespace: the Gateway lives in the deployment's NAMESPACE (env file), e.g. kserve-poc
+  timeoutSec: 900                         # load balancer backend timeout (chart default 300s) for long generations

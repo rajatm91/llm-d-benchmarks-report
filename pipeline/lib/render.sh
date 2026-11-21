@@ -183,6 +183,11 @@ render_router() {
   # MONITORING=gmp: EPP /metrics without auth (--metrics-endpoint-auth=false), so no token ServiceAccount, Secret
   # or cluster RBAC is needed; the chart then renders no PodMonitoring for it, add_epp_monitoring adds one
   [[ $MONITORING != gmp ]] || args+=(--set router.monitoring.prometheus.auth.enabled=false)
+  # gateway.timeoutSec: non-GKE providers take it as the HTTPRoute timeout; GKE's GCPBackendPolicy below
+  if [[ -n $GATEWAY_TIMEOUT ]]; then
+    [[ $GATEWAY_TIMEOUT =~ ^[1-9][0-9]*$ ]] || die "gateway.timeoutSec must be a whole number of seconds, got '$GATEWAY_TIMEOUT'"
+    args+=(--set "httpRoute.requestTimeout=${GATEWAY_TIMEOUT}s")
+  fi
   for s in $ROUTER_SET; do args+=(--set "$s"); done
 
   local dir=$ROOT/.cache/charts/$(basename "$chart")-$ROUTER_CHART_VERSION
@@ -201,6 +206,11 @@ render_router() {
   NAME=$NAME yq -i '(select(.kind != null) | .metadata.labels."llm-d.ai/deployment") = strenv(NAME)' "$ROUTER"
   use_router_sa
   add_epp_monitoring
+  # the chart hard-codes timeoutSec: 300 in its GCPBackendPolicy templates (GKE load balancer backend timeout)
+  if [[ -n $GATEWAY_TIMEOUT ]] && yq -e 'select(.kind == "GCPBackendPolicy")' "$ROUTER" >/dev/null 2>&1; then
+    T=$GATEWAY_TIMEOUT yq -i '(select(.kind == "GCPBackendPolicy") | .spec.default.timeoutSec) = (strenv(T) | tonumber)' "$ROUTER"
+    log "gateway timeout: GCPBackendPolicy timeoutSec=$GATEWAY_TIMEOUT"
+  fi
 }
 
 # MONITORING=gmp: PodMonitoring for the EPP's metrics port (auth disabled above), selecting the EPP pods the same

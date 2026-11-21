@@ -222,6 +222,7 @@ gateway:
   provider: gke                           # renders HealthCheckPolicy + GCPBackendPolicy (else every request 503s)
   name: llm-d-gemma-gateway               # its own Gateway: another model already owns "/" on llm-d-inference-gateway
   # no namespace: the Gateway lives in the deployment's NAMESPACE (env file), e.g. kserve-poc
+  timeoutSec: 900                         # load balancer backend timeout (chart default 300s) for long generations
 ```
 
 Order of `components` matters: the image component and `disaggregatedset-schema` first, then `pd-tiered-cpu` (patches prefill args by index), then `g4-pd-sizing`. Keep `gateway.provider: gke`: it makes the router render the `HealthCheckPolicy` and `GCPBackendPolicy` the GKE load balancer needs. To use agentgateway instead, set `provider: agentgateway`, `name: llm-d-inference-gateway` and `namespace: agentgateway-system` (deploy guide 1.3).
