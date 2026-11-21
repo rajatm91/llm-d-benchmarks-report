@@ -140,6 +140,30 @@ for s in deploy.sh bundle.sh; do
   done
 done
 echo "ok  deploy.sh and bundle.sh --help"
+# --env-file: loads and exports the file (wins over the shell); typos in the file or the shell stop the run
+P=profiles/gemma-4-31b-pd-tiered-g4-gke.yaml
+printf 'NAMESPACE=from-file\nexport SERVICE_ACCOUNT=sa-file\n' > "$T/ok.env"
+[[ $(NAMESPACE=from-shell ./deploy.sh "$P" --env --env-file "$T/ok.env" 2>/dev/null | grep -E '^(NAMESPACE|SERVICE_ACCOUNT)=') == $'NAMESPACE=from-file\nSERVICE_ACCOUNT=sa-file' ]] ||
+  fail env-file "--env-file values not loaded or not winning over the shell"
+printf 'IMAGE_REMOTE=docker.io=x\n' > "$T/typo.env"
+[[ $(./deploy.sh -e "$T/typo.env" "$P" --name 2>&1) == *"did you mean IMAGE_REMOTES"* ]] || fail env-file "typo in env file not caught"
+[[ $(BUNDLE_STEP=images ./deploy.sh "$P" --name 2>&1) == *"did you mean BUNDLE_STEPS"* ]] || fail env-file "typo in shell env not caught"
+! ./deploy.sh -e no-such-env "$P" --name >/dev/null 2>&1 || fail env-file "missing env file should fail"
+printf "IMAGE_REMOTES= 'docker.io=r/d'\n" > "$T/space.env"   # bash would run the value as a command, leaving it unset
+[[ $(./deploy.sh -e "$T/space.env" "$P" --name 2>&1) == *"line 1: space after '='"* ]] || fail env-file "space after = not caught"
+./deploy.sh -e envs/example.env "$P" --name >/dev/null 2>&1 || fail env-file "envs/example.env must load cleanly"
+echo "ok  --env-file loading and typo checks"
+
+# install-lws.sh (needs .cache/charts/lws-1.0.0 + its lock entry from LWS_CHART=1 ./bundle.sh): image mapped and digest-pinned
+if [[ -f .cache/charts/lws-1.0.0/Chart.yaml ]] && grep -q '^registry.k8s.io/lws/lws:' .cache/images.lock 2>/dev/null; then
+  out=$(IMAGE_REGISTRY= IMAGE_REMOTES='registry.k8s.io=reg.test/k8s' ./install-lws.sh --dry-run 2>/dev/null)
+  [[ $out == *"image.manager.repository=reg.test/k8s/lws/lws"* && $out == *"image.manager.tag=v1.0.0@sha256:"* &&
+     $out == *"enableDisaggregatedSet=true"* && $out == *"-f .cache/charts/lws-1.0.0/crds"* ]] || fail install-lws "dry run wrong: $out"
+  ! IMAGE_REGISTRY= IMAGE_REMOTES='docker.io=x' ./install-lws.sh --dry-run >/dev/null 2>&1 || fail install-lws "unmapped registry.k8s.io should fail"
+  echo "ok  install-lws.sh maps and pins the LWS image"
+fi
+for f in -h --help; do [[ $(./install-lws.sh $f) == *"./install-lws.sh --env-file dev --dry-run"* ]] || fail install-lws "$f"; done
+
 # bundle.sh split: an unknown step is refused before any network access
 ! BUNDLE_STEPS=bogus ./bundle.sh >/dev/null 2>&1 || fail bundle "BUNDLE_STEPS=bogus should fail"
 echo "ok  bundle.sh rejects unknown BUNDLE_STEPS"

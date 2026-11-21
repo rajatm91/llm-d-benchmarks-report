@@ -74,12 +74,15 @@ The cluster's nodes pull the images from GAR and the weights from `gs://models_r
 | node-local weight cache | `MODEL_CACHE_PATH` | deploy | `/mnt/stateful_partition/kube-ephemeral-ssd/llm-d-models` |
 | fetch-model image | `DOWNLOADER_IMAGE` | bundle, deploy | `gcr.io/google.com/cloudsdktool/google-cloud-cli:slim` |
 
-Keep the environment variables in one file per environment, [`envs/example.env`](../envs/example.env), and load it before running the scripts:
+Keep the environment variables in one file per environment, [`envs/example.env`](../envs/example.env), and pass it to the scripts with `--env-file` (`-e`):
 
 ```bash
 cp envs/example.env envs/prod.env        # edit: KUBECONFIG, NAMESPACE, IMAGE_REGISTRY, IMAGE_TEMPLATE, ...
-set -a; source envs/prod.env; set +a
+./deploy.sh --env-file prod profiles/<name>.yaml     # envs/prod.env; a path works too
+./bundle.sh --env-file prod profiles/<name>.yaml
 ```
+
+The script loads the file itself (no `set -a`, nothing left in your shell), logs which file and remote hosts it used, and stops on a name that is not a setting: `IMAGE_REMOTE` in the file, or `BUNDLE_STEP=images` on the command line, fails with "did you mean IMAGE_REMOTES / BUNDLE_STEPS?". Values in the file win over the shell. `deploy.sh` prints the kubectl context and namespace before it touches a cluster. The old `set -a; source envs/prod.env; set +a` still works.
 
 > `IMAGE_REGISTRY` and `IMAGE_TEMPLATE` must have the **same values** when you run `bundle.sh` (which writes the mirror list) and `deploy.sh` (which rewrites the manifests). Otherwise the pods reference images that were mirrored somewhere else (`ImagePullBackOff`).
 
@@ -166,6 +169,16 @@ helm upgrade --install lws oci://registry.k8s.io/lws/charts/lws --version=${LWS_
   --wait --timeout 300s
 ```
 
+**Air-gapped:** bundle LWS with the rest and install it from the bundle, no network needed:
+
+```bash
+LWS_CHART=1 ./bundle.sh --env-file prod profiles/<p-d-profile>.yaml   # connected side: chart -> .cache/charts/lws-1.0.0/, image -> lock + mirror list
+./install-lws.sh --env-file prod --dry-run                            # air-gapped side: shows the GAR image and the commands
+./install-lws.sh --env-file prod                                      # CRDs + helm upgrade --install lws (enableDisaggregatedSet=true)
+```
+
+Its one image, `registry.k8s.io/lws/lws`, is mapped like every other image: add `registry.k8s.io=<remote repo>` to `IMAGE_REMOTES` (an Artifact Registry remote repo with custom upstream `https://registry.k8s.io`), or copy it into `IMAGE_REGISTRY` per the mirror list. `LWS_VERSION` picks another chart version (default `1.0.0`). With `BUNDLE_STEPS`, pass `LWS_CHART=1` to both steps.
+
 ### 1.5 Shared namespace, ServiceAccount and access to the weights bucket
 
 All models share one namespace and one pre-existing ServiceAccount. The model-server pods run as it, and the `fetch-model` init container uses it, through Workload Identity, to read the weights bucket.
@@ -220,8 +233,8 @@ Run this once per llm-d version, and again whenever a profile needs an image tha
 
 ```bash
 cd pipeline
-set -a; source envs/prod.env; set +a        # IMAGE_REGISTRY + IMAGE_TEMPLATE fill the mirror list's targets
-./bundle.sh profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml     # or no arguments: every profile
+./bundle.sh --env-file prod profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml   # or no profiles: every profile
+# envs/prod.env: IMAGE_REGISTRY, IMAGE_TEMPLATE, IMAGE_REMOTES fill the mirror list's targets
 ```
 
 `bundle.sh` **does not push anything** by default. It needs internet access, but no access to GAR, GCS or the cluster.
@@ -243,8 +256,7 @@ BUNDLE_STEPS=sources ./bundle.sh profiles/<it>.yaml
 
 # machine B (docker.io, ghcr.io, gcr.io; docker buildx, or plain curl on podman machines): no GitHub needed
 tar -xzf llm-d-sources-<sha>-<date>.tar.gz -C pipeline && cd pipeline
-set -a; source envs/prod.env; set +a
-BUNDLE_STEPS=images ./bundle.sh profiles/<it>.yaml     # digests, mirror list, final llm-d-bundle tarball
+BUNDLE_STEPS=images ./bundle.sh --env-file prod profiles/<it>.yaml     # digests, mirror list, final llm-d-bundle tarball
 ```
 
 Pass the same profiles on both machines (add `ROUTER_CRDS=1` to the sources step if you need it). Machine B renders from the unpacked `.cache/`; if something is missing it stops with "no network? run ./bundle.sh on a connected machine". It also stops if the CRDs from the sources step are missing. Carry the **final** `llm-d-bundle-*` tarball into the air gap, not the sources one: only the final one has `.cache/images.lock`.
@@ -631,12 +643,10 @@ On the deploy machine, inside the air gap:
 ```bash
 tar -xzf llm-d-bundle-<sha>-<date>.tar.gz -C pipeline    # brings .cache/ (guides, chart, CRDs, images.lock)
 cd pipeline
-set -a; source envs/prod.env; set +a                    # cluster, namespace, GAR, layout, bucket
-kubectl config current-context                          # deploy.sh targets whatever this prints
-kubectl get ns "$NAMESPACE" && kubectl get sa "$SERVICE_ACCOUNT" -n "$NAMESPACE"
-
-./deploy.sh profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml --dry-run   # review .build/<name>/
-./deploy.sh profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml
+./deploy.sh -e prod profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml --dry-run   # review .build/<name>/
+./deploy.sh -e prod profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml
+# first log lines: "env file .../envs/prod.env: ..." and "cluster: kubectl context <ctx> (KUBECONFIG=...), namespace ..."
+# preflight then checks the namespace, ServiceAccount, CRDs and Gateway exist
 ```
 
 `deploy.sh` has no cluster setting of its own. It uses kubectl's current context, so check it every time, or give each environment its own `KUBECONFIG` file holding only that cluster, as `envs/example.env` does. In Jenkins, the per-cluster kubeconfig credential does the same ([8](#8-run-it-from-jenkins)).

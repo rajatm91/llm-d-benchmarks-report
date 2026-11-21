@@ -8,6 +8,10 @@
 #   ./deploy.sh profiles/<name>.yaml --env      # print the resolved settings as shell assignments
 #   ./deploy.sh --help                          # this text
 #
+# Load the environment settings with --env-file (or -e), anywhere on the line:
+#   ./deploy.sh --env-file dev profiles/<name>.yaml   # envs/dev.env; a path works too
+# The file wins over the shell; names that are not settings (typos) stop the run.
+#
 # A profile (profiles/*.yaml, every field in docs/configuration.md) picks an upstream llm-d
 # model-server overlay plus optional components/patches, the router values, and the Gateway.
 # Environment-wide settings (namespace, ServiceAccount, bucket, registry) come from the
@@ -24,7 +28,10 @@ log() { printf '\033[1;34m==> %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
 [[ ${1:-} != -h && ${1:-} != --help ]] || { help; exit 0; }
-[[ $# -ge 1 ]] || usage
+# shellcheck source=lib/env.sh
+source "$(dirname "$0")/lib/env.sh"
+env_args "$@"; set -- ${ARGS[@]+"${ARGS[@]}"}   # --env-file / -e anywhere: load + check; ARGS = the rest
+[[ $# -ge 1 && $# -le 2 ]] || usage
 MODE=${2:-deploy}
 [[ $MODE =~ ^(deploy|--dry-run|--delete|--name|--env)$ ]] || usage
 PROFILE=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
@@ -64,8 +71,9 @@ mirror_images          # air-gapped: every image -> IMAGE_REGISTRY
 
 case $MODE in
   --dry-run) log "rendered to $BUILD/{modelserver,router}.yaml"; exit 0 ;;
-  --delete)  delete_all; exit 0 ;;
 esac
+log "cluster: kubectl context $(kubectl config current-context 2>/dev/null || echo '<none>') (KUBECONFIG=${KUBECONFIG:-~/.kube/config}), namespace $NAMESPACE"
+[[ $MODE != --delete ]] || { delete_all; exit 0; }
 
 # ---- deploy ----
 preflight
