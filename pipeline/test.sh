@@ -175,6 +175,17 @@ if [[ -f .cache/charts/lws-1.0.0/Chart.yaml ]] && grep -q '^registry.k8s.io/lws/
 fi
 for f in -h --help; do [[ $(./install-lws.sh $f) == *"./install-lws.sh --env-file dev --dry-run"* ]] || fail install-lws "$f"; done
 
+# modelserver.args may repeat a flag or one the overlay sets (vLLM keeps the last); list-form (P/D) and
+# script-form (tiered-cpu, wide-EP) overlays both get the args once per `vllm serve`
+for p in profiles/gemma-4-31b-pd-tiered-g4-gke.yaml profiles/tiered-cpu-gke.yaml profiles/wide-ep-gke.yaml; do
+  yq '.modelserver.args = ["--max-model-len=65536", "--max-model-len=65536", "--tensor-parallel-size=1", "--kv-cache-dtype=fp8"]' "$p" > "$T/args.yaml"
+  n=$(./deploy.sh "$T/args.yaml" --name)
+  ./deploy.sh "$T/args.yaml" --dry-run >/dev/null 2>&1 || fail "$n" "render with repeated / overlay-set args failed"
+  c=$(yq -N "$VLLM_POD | .containers[] | select($VLLM_CTR) | $CMD" ".build/$n/modelserver.yaml")
+  [[ $(grep -oF -- '--kv-cache-dtype=fp8' <<<"$c" | wc -l) -eq $(grep -oE 'vllm[[:space:]]+serve' <<<"$c" | wc -l) ]] || fail "$n" "args not once per vllm serve"
+done
+echo "ok  modelserver.args with repeated flags, list- and script-form overlays"
+
 # ROUTER_SERVICE_ACCOUNT: no ServiceAccount rendered; EPP Deployment and all binding subjects use the given one
 P=profiles/gemma-4-31b-pd-tiered-g4-gke.yaml; n=$(./deploy.sh "$P" --name)
 ROUTER_SERVICE_ACCOUNT=existing-sa ./deploy.sh "$P" --dry-run >/dev/null 2>&1 || fail router-sa "render failed"
