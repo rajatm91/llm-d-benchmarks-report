@@ -19,6 +19,6 @@ router:
     - guides/pd-disaggregation/router/pd-disaggregation.values.yaml
     - combos/pd-tiered-cpu/router.values.yaml
 gateway:
-  provider: agentgateway
+  provider: gke                           # renders HealthCheckPolicy + GCPBackendPolicy (else every request 503s)
   name: llm-d-inference-gateway
-  namespace: agentgateway-system
+  namespace: gateway-infra

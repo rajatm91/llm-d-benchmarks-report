@@ -51,8 +51,8 @@ The render applies one `DisaggregatedSet`, one `InferencePool` and one `HTTPRout
 | `leaderworkersets` | `leaderworkerset.x-k8s.io` | LWS ≥ v0.11.1 | [deploy-guide 1.4](deploy-guide.md#14-leaderworkerset-only-for-pd-and-wide-ep) (`lws/crds`) |
 | `disaggregatedsets` | `disaggregatedset.x-k8s.io` | LWS, only with `--set enableDisaggregatedSet=true` | same step |
 | `inferencepools` | `inference.networking.k8s.io` (v1) | Gateway API Inference Extension | managed by GKE ≥ 1.34.0-gke.1626000 with Gateway API on; else `kubectl apply -f .cache/crds/inference-extension-v1.yaml` ([1.2](deploy-guide.md#12-gateway-api-and-inferencepool-crds)) |
-| `gateways`, `httproutes`, `gatewayclasses` | `gateway.networking.k8s.io` (v1) | Gateway API | GKE with Gateway API enabled |
-| agentgateway CRDs | agentgateway's own | `agentgateway-crds` chart v1.1.0 | [1.3](deploy-guide.md#13-a-gateway-pick-one) |
+| `gateways`, `httproutes`, `gatewayclasses` | `gateway.networking.k8s.io` (v1) | Gateway API | GKE with Gateway API enabled (`--gateway-api=standard`) |
+| `healthcheckpolicies`, `gcpbackendpolicies` | `networking.gke.io` | GKE Gateway controller | same; the router renders one of each for `provider: gke` |
 
 **Not needed:** the llm-d-router CRDs (`InferenceObjective`, `ROUTER_CRDS=1`, only for flow-control priorities), DRA / `resource.k8s.io` device classes and RDMA NIC drivers (only the `gke` RDMA overlay uses them).
 
@@ -71,23 +71,22 @@ What the rendered manifests run, with the digests `bundle.sh` locked (`.cache/im
 Re-running `bundle.sh` later can lock newer digests for `:main` / `:slim`; `.cache/images.lock` is the source of truth. Print the list for your bundle with:
 
 ```bash
-./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-agentgateway.yaml --dry-run
+./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-gke.yaml --dry-run
 for f in .build/gemma-4-31b-it-pd-tiered-g4-vllm/{modelserver,router}.yaml; do
   yq -N '.. | select(tag == "!!map" and has("image")) | .image' "$f"; done | sort -u
 ```
 
-Air-gapped, the cluster add-ons need their own images mirrored too. `bundle.sh` does not cover them. List them from the charts on the connected machine:
+Air-gapped, LWS needs its own images mirrored too. `bundle.sh` does not cover them. List them from the chart on the connected machine (the GKE Gateway is Google-managed, nothing to mirror):
 
 ```bash
 helm template lws oci://registry.k8s.io/lws/charts/lws --version 1.0.0 --set enableDisaggregatedSet=true | grep -E '^\s+image:' | sort -u
-helm template agentgateway oci://cr.agentgateway.dev/charts/agentgateway --version v1.1.0 --set inferenceExtension.enabled=true | grep -E '^\s+image:' | sort -u
 ```
 
 The model weights are not an image: `fetch-model` copies `gs://models_registry/google__gemma_4_31b_it/` (~63 GB) to each node's local SSD.
 
 ### 1.3 Check the cluster
 
-Do the one-time setup in [deploy-guide.md §1](deploy-guide.md#1-one-time-cluster-setup) first: InferencePool CRD (1.2), a Gateway (1.3, this profile uses agentgateway), **LWS with `enableDisaggregatedSet=true` (1.4)**, namespace + ServiceAccount + Workload Identity (1.5). Then check:
+Do the one-time setup in [deploy-guide.md §1](deploy-guide.md#1-one-time-cluster-setup) first: InferencePool CRD (1.2), a **GKE Gateway** in `gateway-infra` (1.3, `gke-l7-rilb` needs a proxy-only subnet in the region), **LWS with `enableDisaggregatedSet=true` (1.4)**, namespace + ServiceAccount + Workload Identity (1.5). Then check:
 
 ```bash
 kubectl config current-context                         # must be the G4 cluster, not kind
@@ -95,14 +94,14 @@ kubectl get nodes -l node.kubernetes.io/instance-type=g4-standard-96 \
   -o custom-columns=NODE:.metadata.name,GPU:.status.allocatable.nvidia\\.com/gpu,MEM:.status.allocatable.memory,EPH:.status.allocatable.ephemeral-storage
 kubectl get crd inferencepools.inference.networking.k8s.io leaderworkersets.leaderworkerset.x-k8s.io disaggregatedsets.disaggregatedset.x-k8s.io \
   gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io
-kubectl get gatewayclass agentgateway
+kubectl get gatewayclass gke-l7-rilb                   # or gke-l7-regional-external-managed
 kubectl -n lws-system get deploy                       # LWS >= v0.11.1
-kubectl -n agentgateway-system get gateway llm-d-inference-gateway
+kubectl -n gateway-infra get gateway llm-d-inference-gateway   # PROGRAMMED=True, has an ADDRESS
 kubectl -n llm-d get sa llm-d-modelserver
 gcloud storage ls gs://models_registry/google__gemma_4_31b_it/ | head   # weights where the profile expects them
 ```
 
-Expected: 3 nodes, `GPU` = 2 on each, ephemeral storage well above ~63 GB (weights are cached on local SSD once per node), all five CRDs and the `agentgateway` GatewayClass present.
+Expected: 3 nodes, `GPU` = 2 on each, ephemeral storage well above ~63 GB (weights are cached on local SSD once per node), all five CRDs and the GatewayClass present, Gateway programmed with an address.
 
 ---
 
@@ -178,7 +177,7 @@ Prefill needs no sizing patch: upstream already runs it at TP=1 on 1 GPU. The CP
 ### 2.2 Profile
 
 ```yaml
-# profile: profiles/gemma-4-31b-pd-tiered-g4-agentgateway.yaml
+# profile: profiles/gemma-4-31b-pd-tiered-g4-gke.yaml
 # Gemma 4 31B, P/D + CPU KV tier on prefill, on 3 x g4-standard-96 (2 x RTX PRO 6000 96 GB each).
 # 3 x (1 prefill + 1 decode), TP=1 everywhere; KV moves over NIXL/TCP (G4 has no RDMA NICs).
 # router.values: lruCapacityPerServer / peakPrefillThroughput in the combo are gpt-oss/H200 estimates;
@@ -200,12 +199,12 @@ router:
     - guides/pd-disaggregation/router/pd-disaggregation.values.yaml
     - combos/pd-tiered-cpu/router.values.yaml
 gateway:
-  provider: agentgateway
+  provider: gke                           # renders HealthCheckPolicy + GCPBackendPolicy (else every request 503s)
   name: llm-d-inference-gateway
-  namespace: agentgateway-system
+  namespace: gateway-infra
 ```
 
-Order of `components` matters: the image component and `disaggregatedset-schema` first, then `pd-tiered-cpu` (patches prefill args by index), then `g4-pd-sizing`. On GKE Gateway instead of agentgateway, set `gateway.provider: gke` and `namespace: gateway-infra` (deploy guide 1.3).
+Order of `components` matters: the image component and `disaggregatedset-schema` first, then `pd-tiered-cpu` (patches prefill args by index), then `g4-pd-sizing`. Keep `gateway.provider: gke`: it makes the router render the `HealthCheckPolicy` and `GCPBackendPolicy` the GKE load balancer needs. To use agentgateway instead, set `provider: agentgateway` and `namespace: agentgateway-system` (deploy guide 1.3).
 
 ### 2.3 Test
 
@@ -213,7 +212,7 @@ In `test.sh`, right after the `pd-tiered` combo checks (the line ending `fail pd
 
 ```bash
 # G4 sizing: plain nvidia.com/gpu (no RDMA DRA claims), 1 GPU / TP=1 per role, one slice per node, offload on prefill
-B=.build/$(./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-agentgateway.yaml --name)/modelserver.yaml
+B=.build/$(./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-gke.yaml --name)/modelserver.yaml
 [[ -z $(yq -N 'select(.kind=="ResourceClaimTemplate") | .metadata.name' "$B") && -z $(role prefill '.resourceClaims // ""') ]] || fail pd-g4 "G4 has no RDMA NICs: no DRA claims allowed"
 for r in prefill decode; do
   [[ $(role $r '.containers[] | select(.name=="modelserver") | .resources.limits."nvidia.com/gpu"') == 1 ]] || fail pd-g4 "$r must request 1 GPU"
@@ -221,6 +220,7 @@ for r in prefill decode; do
 done
 [[ $(role prefill '.containers[] | select(.name=="modelserver") | .args[]') == *OffloadingConnector* ]] || fail pd-g4 "prefill lost the CPU tier"
 [[ $(yq -N 'select(.kind=="DisaggregatedSet") | (.spec.slices | tostring) + " " + .spec.placementPolicy.topology' "$B") == "3 kubernetes.io/hostname" ]] || fail pd-g4 "want 3 slices, one per node"
+[[ $(yq -N 'select(.kind=="HealthCheckPolicy" or .kind=="GCPBackendPolicy") | .kind' "${B%/*}/router.yaml" | sort -u | wc -l) -eq 2 ]] || fail pd-g4 "GKE Gateway needs HealthCheckPolicy + GCPBackendPolicy (provider: gke)"
 ```
 
 It reuses `role()` from the line above it, which reads `$B` at call time.
@@ -230,8 +230,8 @@ It reuses `role()` from the line above it, which reads `$B` at call time.
 ## 3. Validate offline
 
 ```bash
-./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-agentgateway.yaml --name      # gemma-4-31b-it-pd-tiered-g4-vllm
-./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-agentgateway.yaml --dry-run
+./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-gke.yaml --name      # gemma-4-31b-it-pd-tiered-g4-vllm
+./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-gke.yaml --dry-run
 ./test.sh                                                                     # ends with "all checks passed"
 ```
 
@@ -257,13 +257,13 @@ Air-gapped clusters only. `bundle.sh` locks and lists the five images from [1.2]
 
 ```bash
 set -a; source envs/prod.env; set +a
-./bundle.sh profiles/gemma-4-31b-pd-tiered-g4-agentgateway.yaml
+./bundle.sh profiles/gemma-4-31b-pd-tiered-g4-gke.yaml
 grep -E 'vllm-openai:v0.34.0|disagg-sidecar|endpoint-picker:main|google-cloud-cli:slim|curl:8.11.1' .cache/images.lock   # 5 rows
 ```
 
 GitHub and the image registries on different machines? Run `BUNDLE_STEPS=sources` on the GitHub one and `BUNDLE_STEPS=images` on the registry one, with this profile on both ([deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine)).
 
-Mirror the new rows of `dist/images-to-mirror.tsv` (or use `IMAGE_REMOTES`), as in [deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine). Mirror the LWS and agentgateway images from [1.2](#12-prerequisites-images) separately. `ROUTER_CRDS=1` is not needed.
+Mirror the new rows of `dist/images-to-mirror.tsv` (or use `IMAGE_REMOTES`), as in [deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine). Mirror the LWS images from [1.2](#12-prerequisites-images) separately. `ROUTER_CRDS=1` is not needed.
 
 ---
 
@@ -272,7 +272,7 @@ Mirror the new rows of `dist/images-to-mirror.tsv` (or use `IMAGE_REMOTES`), as 
 ```bash
 set -a; source envs/prod.env; set +a
 kubectl config current-context
-./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-agentgateway.yaml
+./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-gke.yaml
 ```
 
 Preflight stops early if LWS or the `DisaggregatedSet` CRD is missing. The first start downloads ~63 GB of weights to each node's local SSD; both pods on a node share that copy.
@@ -283,7 +283,7 @@ kubectl get pods -n llm-d -l llm-d.ai/deployment=$N -L llm-d.ai/role -o wide   #
 kubectl logs -n llm-d -l llm-d.ai/deployment=$N,llm-d.ai/role=prefill -c modelserver --tail=-1 | grep -iE 'KV cache size|connector|error' | head
 kubectl logs -n llm-d -l llm-d.ai/deployment=$N,llm-d.ai/role=decode  -c modelserver --tail=-1 | grep -iE 'KV cache size|nixl|error' | head
 
-IP=$(kubectl get gateway llm-d-inference-gateway -n agentgateway-system -o jsonpath='{.status.addresses[0].value}')
+IP=$(kubectl get gateway llm-d-inference-gateway -n gateway-infra -o jsonpath='{.status.addresses[0].value}')   # internal IP with gke-l7-rilb: call from inside the VPC
 curl -s http://$IP/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model": "google/gemma-4-31B-it",
   "messages": [{"role": "user", "content": "Say hello in one word."}],
@@ -341,7 +341,7 @@ The general table in [deploy-guide.md §9](deploy-guide.md#9-troubleshooting) st
 
 ```bash
 git checkout -b feat/gemma-pd-tiered-g4
-git add combos/g4-pd-sizing profiles/gemma-4-31b-pd-tiered-g4-agentgateway.yaml test.sh docs/g4-pd-tiered-gemma.md
+git add combos/g4-pd-sizing profiles/gemma-4-31b-pd-tiered-g4-gke.yaml test.sh docs/g4-pd-tiered-gemma.md
 ./test.sh
 git commit -m "feat(pipeline): Gemma 4 31B P/D + tiered KV cache on 3 x g4-standard-96"
 git push -u origin feat/gemma-pd-tiered-g4
