@@ -66,6 +66,7 @@ swap_model             # profile model instead of the overlay's
 set_size               # modelserver.tensorParallel / replicas
 add_vllm_args          # modelserver.args + speculative decoding
 add_weights_fetch      # init container: weights from GCS to the node, vLLM offline
+add_vllm_monitoring    # MONITORING=gmp: PodMonitoring for the vLLM pods
 render_router          # chart + values, pool selects only this deployment
 mirror_images          # air-gapped: every image -> IMAGE_REGISTRY
 

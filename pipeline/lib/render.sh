@@ -174,6 +174,9 @@ render_router() {
   else
     chart=$ROUTER_STANDALONE_CHART
   fi
+  # MONITORING=gmp: EPP /metrics without auth (--metrics-endpoint-auth=false), so no token ServiceAccount, Secret
+  # or cluster RBAC is needed; the chart then renders no PodMonitoring for it, add_epp_monitoring adds one
+  [[ $MONITORING != gmp ]] || args+=(--set router.monitoring.prometheus.auth.enabled=false)
   for s in $ROUTER_SET; do args+=(--set "$s"); done
 
   local dir=$ROOT/.cache/charts/$(basename "$chart")-$ROUTER_CHART_VERSION
@@ -191,22 +194,68 @@ render_router() {
   #  would turn them into kind-less objects that kubectl apply rejects: "apiVersion not set, kind not set")
   NAME=$NAME yq -i '(select(.kind != null) | .metadata.labels."llm-d.ai/deployment") = strenv(NAME)' "$ROUTER"
   use_router_sa
+  add_epp_monitoring
 }
 
-# ROUTER_SERVICE_ACCOUNT: run the EPP as a pre-existing ServiceAccount. The chart has no option for it, so
-# drop the chart's ServiceAccount and point the Deployment and every RBAC binding subject at the given one.
-# The chart's Roles/ClusterRole are still created and bound to it (the EPP needs them).
+# MONITORING=gmp: PodMonitoring for the EPP's metrics port (auth disabled above), selecting the EPP pods the same
+# way its Deployment does
+add_epp_monitoring() {
+  [[ $MONITORING == gmp ]] || return 0
+  local sel
+  sel=$(yq -o=json -I=0 'select(.kind == "Deployment") | .spec.selector.matchLabels' "$ROUTER")
+  [[ -n $sel && $sel != null && $(wc -l <<<"$sel") -eq 1 ]] || die "MONITORING=gmp: expected one EPP Deployment in the router render"
+  yq -e 'select(.kind == "Deployment") | .spec.template.spec.containers[].ports[] | select(.name == "metrics")' "$ROUTER" >/dev/null 2>&1 ||
+    die "MONITORING=gmp: the EPP container has no port named metrics"
+  yq -e 'select(.kind == "Deployment") | .spec.template.spec.containers[].args[] | select(. == "--metrics-endpoint-auth=false")' "$ROUTER" >/dev/null 2>&1 ||
+    die "MONITORING=gmp: the EPP still requires auth on /metrics (router chart ignored monitoring.prometheus.auth.enabled=false)"
+  log "MONITORING=gmp: PodMonitoring $NAME-epp scrapes the EPP's /metrics (auth disabled)"
+  { echo "---"
+    NAME=$NAME SEL=$sel INTERVAL=$MONITORING_INTERVAL yq -n '
+      .apiVersion = "monitoring.googleapis.com/v1" | .kind = "PodMonitoring" |
+      .metadata.name = strenv(NAME) + "-epp" | .metadata.labels."llm-d.ai/deployment" = strenv(NAME) |
+      .spec.selector.matchLabels = (strenv(SEL) | from_json) | .spec.selector.matchLabels style="" |
+      .spec.endpoints = [{"port": "metrics", "path": "/metrics", "interval": strenv(INTERVAL)}]'
+  } >> "$ROUTER"
+}
+
+# ROUTER_SERVICE_ACCOUNT: the router uses a pre-existing ServiceAccount instead of creating its own. The chart
+# has no option for it, so drop every ServiceAccount it renders (<name>-epp) and point everything that names
+# them at the given one: the EPP Deployment, RBAC binding subjects, and any token Secret. The chart's
+# Roles/ClusterRoles are still created and bound to it.
 use_router_sa() {
   [[ -n $ROUTER_SERVICE_ACCOUNT ]] || return 0
-  local old; old=$(yq -N 'select(.kind == "ServiceAccount") | .metadata.name' "$ROUTER")
-  [[ -n $old && $(wc -l <<<"$old") -eq 1 ]] || die "router render has $(wc -l <<<"$old" | tr -d ' ') ServiceAccounts ($(echo $old)); expected one to replace with $ROUTER_SERVICE_ACCOUNT"
-  log "router runs as existing ServiceAccount $ROUTER_SERVICE_ACCOUNT (not creating $old)"
-  OLD=$old yq -i 'select(.kind != "ServiceAccount" or .metadata.name != strenv(OLD))' "$ROUTER"
-  OLD=$old SA=$ROUTER_SERVICE_ACCOUNT yq -i '
-    (.. | select(tag == "!!map" and .serviceAccountName == strenv(OLD)) | .serviceAccountName) = strenv(SA) |
-    ((.subjects // [])[] | select(.kind == "ServiceAccount" and .name == strenv(OLD)) | .name) = strenv(SA)' "$ROUTER"
-  ! grep -qw -- "$old" <(yq -N '.. | select(tag == "!!map") | (.serviceAccountName // ""), ((.subjects // [])[] | select(.kind == "ServiceAccount") | .name)' "$ROUTER") ||
-    die "router render still refers to ServiceAccount $old"
+  local old; old=$(yq -N 'select(.kind == "ServiceAccount") | .metadata.name' "$ROUTER" | sort -u)
+  [[ -n $old ]] || die "router render has no ServiceAccount to replace with $ROUTER_SERVICE_ACCOUNT"
+  log "router uses existing ServiceAccount $ROUTER_SERVICE_ACCOUNT (not creating $(echo $old))"
+  OLD=$(echo $old) SA=$ROUTER_SERVICE_ACCOUNT yq -i '
+    (strenv(OLD) | split(" ")) as $old |
+    select(.kind != "ServiceAccount" or ([.metadata.name] - $old | length) == 1) |
+    (.. | select(tag == "!!map" and has("serviceAccountName") and ([.serviceAccountName] - $old | length) == 0) | .serviceAccountName) = strenv(SA) |
+    (select(has("subjects")) | .subjects[] | select(.kind == "ServiceAccount" and ([.name] - $old | length) == 0) | .name) = strenv(SA) |
+    (select(.kind == "Secret" and .metadata.annotations."kubernetes.io/service-account.name" != null and ([.metadata.annotations."kubernetes.io/service-account.name"] - $old | length) == 0)
+      | .metadata.annotations."kubernetes.io/service-account.name") = strenv(SA)' "$ROUTER"
+  local o; for o in $old; do
+    ! grep -qxF -- "$o" <(yq -N '.. | select(tag == "!!map") | (.serviceAccountName // ""), ((.subjects // [])[] | select(.kind == "ServiceAccount") | .name), (.metadata.annotations."kubernetes.io/service-account.name" // ""), (select(.kind == "ServiceAccount") | .metadata.name)' "$ROUTER") ||
+      die "router render still refers to ServiceAccount $o"
+  done
+}
+
+# MONITORING=gmp: GKE Managed Prometheus scrapes vLLM. One PodMonitoring per deployment selects its model-server
+# pods and scrapes every port of the vLLM containers (one per DP rank on wide-EP) except KV transfer / supervisor.
+# vLLM's /metrics needs no auth. (The EPP's PodMonitoring comes from the router chart, see render_router.)
+add_vllm_monitoring() {
+  [[ $MONITORING == gmp ]] || return 0
+  local ports; ports=$(yq -N "$VLLM_POD | .containers[] | select($VLLM_CTR) | (.ports // [])[] | .name // \"\"" "$MS" |
+    grep -vE '^(nixl.*|supervisor)?$' | sort -u)
+  [[ -n $ports ]] || die "MONITORING=gmp: the vLLM containers have no named ports to scrape; add a port name with modelserver.patches"
+  log "MONITORING=gmp: PodMonitoring $NAME-modelserver scrapes /metrics on port(s) $(echo $ports)"
+  { echo "---"
+    NAME=$NAME PORTS=$(echo $ports) INTERVAL=$MONITORING_INTERVAL yq -n '
+      .apiVersion = "monitoring.googleapis.com/v1" | .kind = "PodMonitoring" |
+      .metadata.name = strenv(NAME) + "-modelserver" | .metadata.labels."llm-d.ai/deployment" = strenv(NAME) |
+      .spec.selector.matchLabels."llm-d.ai/deployment" = strenv(NAME) |
+      .spec.endpoints = [strenv(PORTS) | split(" ")[] | {"port": ., "path": "/metrics", "interval": strenv(INTERVAL)}]'
+  } >> "$MS"
 }
 
 # Air-gapped (IMAGE_REGISTRY and/or IMAGE_REMOTES set): every image -> its remote repo, or IMAGE_REGISTRY

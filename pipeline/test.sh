@@ -25,6 +25,10 @@ for p in profiles/*.yaml; do
     [[ $NAME =~ ^[a-z0-9-]+-${STRATEGY}-(vllm|sglang|trtllm)$ ]] || fail "$NAME" "name does not follow <model>-<strategy>-<engine>"
     ./deploy.sh "$p" --dry-run >/dev/null 2>&1 || fail "$NAME" "render failed: ./deploy.sh $p --dry-run"
     B=.build/$NAME
+    # kubectl apply rejects documents without apiVersion/kind ("apiVersion not set, kind not set"), and
+    # strict field validation rejects fields a kind does not have (e.g. subjects outside RBAC bindings)
+    bad=$(yq -N 'select(has("subjects") and (.kind | test("Binding$") | not)) | .kind + "/" + .metadata.name' "$B/modelserver.yaml" "$B/router.yaml")
+    [[ -z $bad ]] || fail "$NAME" "subjects on non-binding objects: $(echo $bad)"
     # kubectl apply rejects documents without apiVersion/kind ("apiVersion not set, kind not set")
     bad=$(yq -N 'select(. != null and (.kind == null or .apiVersion == null)) | document_index' "$B/modelserver.yaml" "$B/router.yaml")
     [[ -z $bad ]] || fail "$NAME" "render has documents without apiVersion/kind (index $(echo $bad))"
@@ -179,6 +183,28 @@ R=.build/$n/router.yaml
 [[ $(yq -N '.. | select(tag == "!!map") | (select(has("serviceAccountName")) | .serviceAccountName), ((.subjects // [])[] | select(.kind == "ServiceAccount") | .name)' "$R" | sort -u) == existing-sa ]] ||
   fail router-sa "EPP or a binding does not use existing-sa"
 echo "ok  ROUTER_SERVICE_ACCOUNT reuses an existing ServiceAccount"
+
+# MONITORING=gmp: PodMonitoring for vLLM (every rank port, no nixl/supervisor) and the EPP (auth disabled, so no
+# token ServiceAccount/Secret/cluster RBAC); with ROUTER_SERVICE_ACCOUNT no ServiceAccount at all
+P=profiles/gemma-4-31b-pd-tiered-g4-gke.yaml; n=$(./deploy.sh "$P" --name)
+MONITORING=gmp ROUTER_SERVICE_ACCOUNT=existing-sa ./deploy.sh "$P" --dry-run >/dev/null 2>&1 || fail monitoring "render failed"
+[[ $(yq -N 'select(.kind == "PodMonitoring") | .spec.selector.matchLabels."llm-d.ai/deployment" + " " + (.spec.endpoints | map(.port) | join(","))' ".build/$n/modelserver.yaml") == "$n modelserver" ]] ||
+  fail monitoring "vLLM PodMonitoring missing or wrong"
+R=.build/$n/router.yaml
+[[ $(yq -N 'select(.kind == "PodMonitoring") | .metadata.name + " " + .spec.endpoints[0].port + " " + (.spec.endpoints[0].authorization // "noauth" | tostring)' "$R") == "$n-epp metrics noauth" ]] ||
+  fail monitoring "EPP PodMonitoring missing, or still uses auth"
+[[ $(yq -o=json -I=0 'select(.kind == "PodMonitoring") | .spec.selector.matchLabels' "$R") == $(yq -o=json -I=0 'select(.kind == "Deployment") | .spec.selector.matchLabels' "$R") ]] ||
+  fail monitoring "EPP PodMonitoring does not select the EPP pods"
+yq -e 'select(.kind == "Deployment") | .spec.template.spec.containers[0].args[] | select(. == "--metrics-endpoint-auth=false")' "$R" >/dev/null || fail monitoring "EPP not started with --metrics-endpoint-auth=false"
+[[ -z $(yq -N 'select(.kind == "ServiceAccount" or .kind == "Secret" or (.metadata.name | test("metrics-reader"))) | .kind + "/" + .metadata.name' "$R") ]] ||
+  fail monitoring "metrics token objects or ServiceAccounts still rendered"
+[[ -z $(yq -N 'select(has("subjects") and (.kind | test("Binding$") | not)) | .kind' "$R" ".build/$n/modelserver.yaml") ]] ||
+  fail monitoring "ROUTER_SERVICE_ACCOUNT added subjects to non-binding objects"
+w=$(./deploy.sh profiles/wide-ep-gke.yaml --name); MONITORING=gmp ./deploy.sh profiles/wide-ep-gke.yaml --dry-run >/dev/null 2>&1 || fail monitoring "wide-EP render failed"
+[[ $(yq -N 'select(.kind == "PodMonitoring") | .spec.endpoints | map(.port) | join(" ")' ".build/$w/modelserver.yaml") == *rank7* &&
+   $(yq -N 'select(.kind == "PodMonitoring") | .spec.endpoints | map(.port) | join(" ")' ".build/$w/modelserver.yaml") != *supervisor* ]] ||
+  fail monitoring "wide-EP PodMonitoring should scrape every rank port, not the supervisor"
+echo "ok  MONITORING=gmp PodMonitoring for vLLM and EPP"
 
 # bundle.sh split: an unknown step is refused before any network access
 ! BUNDLE_STEPS=bogus ./bundle.sh >/dev/null 2>&1 || fail bundle "BUNDLE_STEPS=bogus should fail"

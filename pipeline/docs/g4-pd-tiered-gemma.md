@@ -322,6 +322,15 @@ Check in the logs:
 
 ---
 
+**Metrics (optional).** With `MONITORING=gmp` in the env file, the deploy also creates GKE Managed Prometheus `PodMonitoring` objects: `<name>-modelserver` for vLLM (`/metrics` on the `modelserver` port of every prefill and decode pod) and `<name>-epp` for the EPP (`metrics` port 9090). The EPP runs with `--metrics-endpoint-auth=false`, so neither needs a token. The cluster needs Managed Service for Prometheus enabled; preflight checks for the CRD.
+
+```bash
+kubectl -n <NAMESPACE> get podmonitoring                                  # <name>-modelserver and <name>-epp
+kubectl -n <NAMESPACE> describe podmonitoring gemma-4-31b-it-pd-tiered-g4-vllm-modelserver | sed -n '/Status/,$p'   # ConfigurationCreateSuccess
+```
+
+Metrics then show up in Cloud Monitoring (Metrics Explorer, PromQL), e.g. `vllm:num_requests_running` and `vllm:num_requests_waiting` per pod.
+
 ## 6. Tune before production
 
 The router values in `combos/pd-tiered-cpu/router.values.yaml` were estimated for gpt-oss-120b on H200. For Gemma on G4, compute them from the prefill startup log instead of guessing:
