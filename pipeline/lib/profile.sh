@@ -10,6 +10,7 @@ GATEWAY_NAME=llm-d-inference-gateway
 GATEWAY_NAMESPACE=""           # "" = same namespace as the deployment
 GATEWAY_PROVIDER=none          # gke | agentgateway | istio | none  (selects HealthCheckPolicy / DestinationRule)
 BASE_MODEL=""                  # set when several models share one Gateway (needs IPP, see README)
+GATEWAY_TIMEOUT=""             # gateway.timeoutSec: request timeout; "" = chart's 300s
 COMPONENTS=""; PATCHES=""; ROUTER_VALUES=""; ROUTER_SET=""
 WAIT_TIMEOUT=60m
 MODEL_ALIAS=""                 # short model slug when the HF name makes NAME too long
@@ -47,7 +48,7 @@ load_profile() {
                         "modelserver","router","gateway","weights","llmdRef","waitTimeout"])
     + ((.modelserver // {}) | keys - ["overlay","components","patches","args","tensorParallel","replicas","image"] | map("modelserver." + .))
     + ((.router // {}) | keys - ["mode","values","set","chartVersion"] | map("router." + .))
-    + ((.gateway // {}) | keys - ["provider","name","namespace","baseModel"] | map("gateway." + .))
+    + ((.gateway // {}) | keys - ["provider","name","namespace","baseModel","timeoutSec"] | map("gateway." + .))
     + ((.weights // {}) | keys - ["gcsUri"] | map("weights." + .)) | .[]' "$PROFILE")
   [[ -z $bad ]] || die "unknown key(s) in $PROFILE: $(echo $bad)"
 
@@ -64,7 +65,7 @@ load_profile() {
       ["ROUTER_VALUES", (.router.values | select(. != null) | join(" "))],
       ["ROUTER_SET", (.router.set | select(. != null) | join(" "))],
       ["GATEWAY_PROVIDER", .gateway.provider], ["GATEWAY_NAME", .gateway.name],
-      ["GATEWAY_NAMESPACE", .gateway.namespace], ["BASE_MODEL", .gateway.baseModel],
+      ["GATEWAY_NAMESPACE", .gateway.namespace], ["BASE_MODEL", .gateway.baseModel], ["GATEWAY_TIMEOUT", .gateway.timeoutSec],
       ["MODEL_GCS_URI", .weights.gcsUri], ["LLMD_REF", .llmdRef], ["WAIT_TIMEOUT", .waitTimeout] ]
     | .[] | select(.[1] != null) | .[0] + "=" + (.[1] | tostring | @sh)' "$PROFILE")"
 
@@ -93,7 +94,7 @@ print_env() {
   local v
   for v in NAME NAMESPACE SERVICE_ACCOUNT ROUTER_SERVICE_ACCOUNT MONITORING MODEL STRATEGY ENGINE DRAFT_MODEL SPEC_CONFIG MODELSERVER_OVERLAY COMPONENTS PATCHES \
            ROUTER_MODE ROUTER_VALUES MS_TP MS_REPLICAS MS_ARGS_JSON MS_IMAGE SPEC_SET GATEWAY_PROVIDER GATEWAY_NAME GATEWAY_NAMESPACE \
-           BASE_MODEL MODEL_BUCKET LLMD_REF WAIT_TIMEOUT SMOKE_IMAGE; do
+           BASE_MODEL GATEWAY_TIMEOUT MODEL_BUCKET LLMD_REF WAIT_TIMEOUT SMOKE_IMAGE; do
     printf '%s=%q\n' "$v" "${!v}"
   done
 }

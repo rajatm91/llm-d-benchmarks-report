@@ -111,6 +111,7 @@ The pipeline always sets these, so values files can't change them: `router.model
 | `name` | `llm-d-inference-gateway` | Existing Gateway. Upstream manifests for one: `guides/recipes/gateway/<agentgateway|gke-l7-rilb|gke-l7-regional-external-managed|istio|kgateway|envoy-ai-gateway|nginx-gateway-fabric>`. |
 | `namespace` | `$NAMESPACE` | Gateway's namespace. Its listeners must allow routes from `$NAMESPACE`. |
 | `baseModel` | | Needed when several models share one Gateway (routes match on `X-Gateway-Base-Model-Name`; needs IPP). Without it, the render stops if the Gateway already has routes. |
+| `timeoutSec` | chart's `300` | Request timeout in whole seconds. GKE: sets `timeoutSec` on every `GCPBackendPolicy` the router renders (the load balancer's backend timeout; the chart hard-codes 300). Other providers: the HTTPRoute request timeout (`httpRoute.requestTimeout`). Raise it for long generations. |
 
 ## 4. Model-server overlays
 
