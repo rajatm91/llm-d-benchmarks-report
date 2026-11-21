@@ -20,5 +20,5 @@ router:
     - combos/pd-tiered-cpu/router.values.yaml
 gateway:
   provider: gke                           # renders HealthCheckPolicy + GCPBackendPolicy (else every request 503s)
-  name: llm-d-inference-gateway
-  namespace: gateway-infra
+  name: llm-d-gemma-gateway               # its own Gateway: another model already owns "/" on llm-d-inference-gateway
+  # no namespace: the Gateway lives in the deployment's NAMESPACE (env file), e.g. kserve-poc

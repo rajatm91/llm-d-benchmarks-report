@@ -82,7 +82,7 @@ The model weights are not an image: `fetch-model` copies `gs://models_registry/g
 
 ### 1.3 Check the cluster
 
-Do the one-time setup in [deploy-guide.md §1](deploy-guide.md#1-one-time-cluster-setup) first: InferencePool CRD (1.2), a **GKE Gateway** in `gateway-infra` (1.3, `gke-l7-rilb` needs a proxy-only subnet in the region), **LWS with `enableDisaggregatedSet=true` (1.4)**, namespace + ServiceAccount + Workload Identity (1.5). Then check:
+Do the one-time setup in [deploy-guide.md §1](deploy-guide.md#1-one-time-cluster-setup) first: InferencePool CRD (1.2), a **GKE Gateway** named `llm-d-gemma-gateway` in the deployment namespace (below; `gke-l7-rilb` needs a proxy-only subnet in the region), **LWS with `enableDisaggregatedSet=true` (1.4)**, namespace + ServiceAccount + Workload Identity (1.5). Then check:
 
 ```bash
 kubectl config current-context                         # must be the G4 cluster, not kind
@@ -92,12 +92,36 @@ kubectl get crd inferencepools.inference.networking.k8s.io leaderworkersets.lead
   gateways.gateway.networking.k8s.io httproutes.gateway.networking.k8s.io
 kubectl get gatewayclass gke-l7-rilb                   # or gke-l7-regional-external-managed
 kubectl -n lws-system get deploy                       # LWS >= v0.11.1
-kubectl -n gateway-infra get gateway llm-d-inference-gateway   # PROGRAMMED=True, has an ADDRESS
-kubectl -n llm-d get sa llm-d-modelserver
+kubectl -n <NAMESPACE> get gateway llm-d-gemma-gateway   # PROGRAMMED=True, has an ADDRESS
+kubectl -n <NAMESPACE> get sa <SERVICE_ACCOUNT>
 gcloud storage ls gs://models_registry/google__gemma_4_31b_it/ | head   # weights where the profile expects them
 ```
 
 Expected: 3 nodes, `GPU` = 2 on each, ephemeral storage well above ~63 GB (weights are cached on local SSD once per node), all five CRDs and the GatewayClass present, Gateway programmed with an address.
+
+**The Gateway.** The model gets its own Gateway, because its route is a catch-all (`/`) and two catch-alls on one Gateway conflict (the older wins, and `deploy.sh` stops with `Gateway already has catch-all "/" routes`). Create it once in the deployment namespace, with the same class as your other Gateways:
+
+```yaml
+# gemma-gateway.yaml  ->  kubectl apply -n <NAMESPACE> -f gemma-gateway.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: llm-d-gemma-gateway
+spec:
+  gatewayClassName: gke-l7-rilb          # internal; gke-l7-regional-external-managed for external
+  listeners:
+    - name: default
+      port: 80
+      protocol: HTTP                     # same namespace as the route, so the default allowedRoutes is enough
+```
+
+```bash
+kubectl -n <NAMESPACE> get gateway llm-d-gemma-gateway -w    # PROGRAMMED=True and an ADDRESS after a few minutes
+```
+
+To share a Gateway that already has a catch-all route instead, set `gateway.baseModel` and install IPP ([deploy guide 1.6](deploy-guide.md#16-several-models-on-one-gateway-inference-payload-processor)). Routes on specific paths (`/optimized-baseline`) do not conflict.
+
+**ServiceAccounts.** Model-server pods run as `SERVICE_ACCOUNT`. The router chart also creates `<name>-epp` for its EPP; to reuse an existing account instead, set `ROUTER_SERVICE_ACCOUNT` in the env file (e.g. the same `SERVICE_ACCOUNT`). The chart's Roles and ClusterRole are then bound to that account.
 
 ---
 
@@ -196,11 +220,11 @@ router:
     - combos/pd-tiered-cpu/router.values.yaml
 gateway:
   provider: gke                           # renders HealthCheckPolicy + GCPBackendPolicy (else every request 503s)
-  name: llm-d-inference-gateway
-  namespace: gateway-infra
+  name: llm-d-gemma-gateway               # its own Gateway: another model already owns "/" on llm-d-inference-gateway
+  # no namespace: the Gateway lives in the deployment's NAMESPACE (env file), e.g. kserve-poc
 ```
 
-Order of `components` matters: the image component and `disaggregatedset-schema` first, then `pd-tiered-cpu` (patches prefill args by index), then `g4-pd-sizing`. Keep `gateway.provider: gke`: it makes the router render the `HealthCheckPolicy` and `GCPBackendPolicy` the GKE load balancer needs. To use agentgateway instead, set `provider: agentgateway` and `namespace: agentgateway-system` (deploy guide 1.3).
+Order of `components` matters: the image component and `disaggregatedset-schema` first, then `pd-tiered-cpu` (patches prefill args by index), then `g4-pd-sizing`. Keep `gateway.provider: gke`: it makes the router render the `HealthCheckPolicy` and `GCPBackendPolicy` the GKE load balancer needs. To use agentgateway instead, set `provider: agentgateway`, `name: llm-d-inference-gateway` and `namespace: agentgateway-system` (deploy guide 1.3).
 
 ### 2.3 Test
 
@@ -283,7 +307,7 @@ kubectl get pods -n llm-d -l llm-d.ai/deployment=$N -L llm-d.ai/role -o wide   #
 kubectl logs -n llm-d -l llm-d.ai/deployment=$N,llm-d.ai/role=prefill -c modelserver --tail=-1 | grep -iE 'KV cache size|connector|error' | head
 kubectl logs -n llm-d -l llm-d.ai/deployment=$N,llm-d.ai/role=decode  -c modelserver --tail=-1 | grep -iE 'KV cache size|nixl|error' | head
 
-IP=$(kubectl get gateway llm-d-inference-gateway -n gateway-infra -o jsonpath='{.status.addresses[0].value}')   # internal IP with gke-l7-rilb: call from inside the VPC
+IP=$(kubectl get gateway llm-d-gemma-gateway -n <NAMESPACE> -o jsonpath='{.status.addresses[0].value}')   # internal IP with gke-l7-rilb: call from inside the VPC
 curl -s http://$IP/v1/chat/completions -H 'Content-Type: application/json' -d '{
   "model": "google/gemma-4-31B-it",
   "messages": [{"role": "user", "content": "Say hello in one word."}],
@@ -331,6 +355,9 @@ Other knobs:
 | vLLM OOM / `max_model_len ... larger than the maximum number of tokens that can be stored in KV cache` | Lower `--max-model-len` or add `--quantization=fp8`. |
 | vLLM rejects the connector with the hybrid KV cache manager | Replace `--no-disable-hybrid-kv-cache-manager` with `--disable-hybrid-kv-cache-manager` on both roles (a `modelserver.patches` file, or a `replace` op in `g4-pd-sizing`). Uses more KV memory for sliding-window layers; recompute [6](#6-tune-before-production). |
 | High TTFT, decode waits on KV transfer | Cross-node NIXL over TCP. Compare with 6 aggregated replicas (see the note in [0](#0-layout-and-why)). |
+| `Gateway llm-d-gemma-gateway not found` | Create it in the deployment namespace ([1.3](#13-check-the-cluster)), or point `gateway.name` / `gateway.namespace` at an existing one. |
+| `Gateway already has catch-all "/" routes` | Another model owns `/` on that Gateway. Use this model's own Gateway, or `gateway.baseModel` + IPP. |
+| `kubectl apply`: `apiVersion not set, kind not set` | Router render from a pipeline before the fix that skips helm's empty documents; update `lib/render.sh`. |
 | Decode `Connection reset` under load | Keep-alive mismatch; keep upstream's `VLLM_HTTP_TIMEOUT_KEEP_ALIVE=120`. |
 
 The general table in [deploy-guide.md §9](deploy-guide.md#9-troubleshooting) still applies (403 on `fetch-model`, `ImagePullBackOff`, images missing from the lock, ...).

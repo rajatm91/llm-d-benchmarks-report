@@ -22,6 +22,7 @@ MS_IMAGE=""                    # modelserver.image: replaces the overlay's vLLM 
 # ---- environment (the same for every profile; envs/<env>.env or Jenkins) ------------
 NAMESPACE=${NAMESPACE:-llm-d}                           # shared by every model
 SERVICE_ACCOUNT=${SERVICE_ACCOUNT:-llm-d-modelserver}   # pre-existing in NAMESPACE; model-server pods run as it
+ROUTER_SERVICE_ACCOUNT=${ROUTER_SERVICE_ACCOUNT:-}      # "" = the router chart creates <name>-epp; else this pre-existing SA
 # Weights are already in GCS (stored by the garuda repo), one folder per model:
 #   google/gemma-4-31B-it -> gs://models_registry/google__gemma_4_31b_it
 MODEL_BUCKET=${MODEL_BUCKET:-gs://models_registry}
@@ -87,7 +88,7 @@ slug() { tr '[:upper:]' '[:lower:]' <<<"$1" | sed -E 's/[^a-z0-9]+/-/g; s/^-+//;
 # print_env: the resolved settings as shell assignments (./deploy.sh <profile> --env; used by test.sh, bundle.sh)
 print_env() {
   local v
-  for v in NAME NAMESPACE SERVICE_ACCOUNT MODEL STRATEGY ENGINE DRAFT_MODEL SPEC_CONFIG MODELSERVER_OVERLAY COMPONENTS PATCHES \
+  for v in NAME NAMESPACE SERVICE_ACCOUNT ROUTER_SERVICE_ACCOUNT MODEL STRATEGY ENGINE DRAFT_MODEL SPEC_CONFIG MODELSERVER_OVERLAY COMPONENTS PATCHES \
            ROUTER_MODE ROUTER_VALUES MS_TP MS_REPLICAS MS_ARGS_JSON MS_IMAGE SPEC_SET GATEWAY_PROVIDER GATEWAY_NAME GATEWAY_NAMESPACE \
            BASE_MODEL MODEL_BUCKET LLMD_REF WAIT_TIMEOUT SMOKE_IMAGE; do
     printf '%s=%q\n' "$v" "${!v}"
