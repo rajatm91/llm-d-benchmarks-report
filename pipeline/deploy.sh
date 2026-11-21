@@ -6,6 +6,7 @@
 #   ./deploy.sh profiles/<name>.yaml --delete   # tear down router + model servers
 #   ./deploy.sh profiles/<name>.yaml --name     # print the derived deployment name
 #   ./deploy.sh profiles/<name>.yaml --env      # print the resolved settings as shell assignments
+#   ./deploy.sh --help                          # this text
 #
 # A profile (profiles/*.yaml, every field in docs/configuration.md) picks an upstream llm-d
 # model-server overlay plus optional components/patches, the router values, and the Gateway.
@@ -16,10 +17,13 @@
 # lib/cluster.sh (preflight, apply, wait, smoke test), lib/images.sh (air-gap image names).
 set -euo pipefail
 
-usage() { sed -n 2,16p "$0" >&2; exit 1; }
+# header comment above `set -euo pipefail`, without the leading "# "
+help() { sed -n '2,/^set -euo pipefail/{/^set /d;s/^# \{0,1\}//;p;}' "$0"; }
+usage() { help >&2; exit 1; }
 log() { printf '\033[1;34m==> %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 
+[[ ${1:-} != -h && ${1:-} != --help ]] || { help; exit 0; }
 [[ $# -ge 1 ]] || usage
 MODE=${2:-deploy}
 [[ $MODE =~ ^(deploy|--dry-run|--delete|--name|--env)$ ]] || usage

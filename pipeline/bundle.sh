@@ -3,6 +3,7 @@
 #
 #   ./bundle.sh                                   # all profiles
 #   ./bundle.sh profiles/a.yaml profiles/b.yaml   # only these profiles
+#   ./bundle.sh --help                            # this text
 #
 # Split across two machines (one reaches GitHub, the other the image registries):
 #   machine A: BUNDLE_STEPS=sources ./bundle.sh   # guides, charts, CRDs -> $OUT/llm-d-sources-<sha>-<date>.tar.gz
@@ -38,6 +39,8 @@ log() { printf '\033[1;34m==> %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 # shellcheck source=lib/images.sh
 source lib/images.sh
+# header comment above `set -euo pipefail`, without the leading "# "
+[[ ${1:-} != -h && ${1:-} != --help ]] || { sed -n '2,/^set -euo pipefail/{/^set /d;s/^# \{0,1\}//;p;}' "$0"; exit 0; }
 
 PROFILES=("$@"); [[ ${#PROFILES[@]} -gt 0 ]] || PROFILES=(profiles/*.yaml)
 IMAGE_REGISTRY=${IMAGE_REGISTRY:-}
