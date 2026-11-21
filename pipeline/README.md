@@ -44,8 +44,7 @@ The router chart always creates its own EPP ServiceAccount (`NAME-epp`) and RBAC
 
 On a machine **with** internet access (it needs no access to GAR, GCS or the cluster):
 ```bash
-set -a; source envs/prod.env; set +a   # IMAGE_REGISTRY + IMAGE_TEMPLATE: where images will live in GAR
-./bundle.sh                            # or: ./bundle.sh profiles/a.yaml profiles/b.yaml
+./bundle.sh --env-file prod           # envs/prod.env: IMAGE_REGISTRY/IMAGE_TEMPLATE/IMAGE_REMOTES; or add profiles/a.yaml ...
 ```
 1. **Renders every profile.** This fills `.cache/` (the pinned llm-d guides, the router chart under `.cache/charts/`, the InferencePool CRDs under `.cache/crds/`) and `.build/`.
 2. **Locks image digests.** Every image the renders use, plus the smoke-test image, is resolved to a digest in `.cache/images.lock`. Moving tags like `:main`, `:nightly` and `:latest` are frozen there.
@@ -63,9 +62,10 @@ Keep `{digest}` only if your copy preserves digests. `bundle.sh` and `deploy.sh`
 
 Inside the air gap, unpack the tarball and deploy as usual:
 ```bash
-set -a; source envs/prod.env; set +a   # cluster (KUBECONFIG), NAMESPACE, IMAGE_REGISTRY, IMAGE_TEMPLATE, MODEL_BUCKET
-./deploy.sh profiles/<name>.yaml
+./deploy.sh --env-file prod profiles/<name>.yaml   # envs/prod.env: KUBECONFIG, NAMESPACE, IMAGE_*, MODEL_BUCKET
 ```
+P/D and wide-EP also need LeaderWorkerSet on the cluster: bundle it with `LWS_CHART=1 ./bundle.sh ...` and install it from the bundle with `./install-lws.sh --env-file prod` (once per cluster).
+
 `deploy.sh` needs no network. It reads the guides and chart from `.cache/` and rewrites every image into `IMAGE_REGISTRY` per `IMAGE_TEMPLATE`. An image that is not in `images.lock` fails the render. A new profile or an `llmdRef` bump means re-running `bundle.sh` (with just the new profiles is fine; the lock is merged). `./test.sh` checks the air-gapped rewrite for every profile whenever `images.lock` exists.
 
 The router is applied from the rendered manifest (`kubectl apply --server-side`), like the model servers. The chart has no hooks or lookups, so this is what `helm install` would create, and it is exactly the manifest that `--dry-run` and Jenkins archive. All router objects carry `llm-d.ai/deployment=<name>`. Removing resources that disappeared between chart versions is not automatic: run `--delete` with the old render first.

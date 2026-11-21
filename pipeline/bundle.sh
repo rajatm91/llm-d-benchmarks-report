@@ -4,6 +4,7 @@
 #   ./bundle.sh                                   # all profiles
 #   ./bundle.sh profiles/a.yaml profiles/b.yaml   # only these profiles
 #   ./bundle.sh --help                            # this text
+#   ./bundle.sh --env-file dev [profiles...]      # load envs/dev.env (or a path) first; -e for short
 #
 # Split across two machines (one reaches GitHub, the other the image registries):
 #   machine A: BUNDLE_STEPS=sources ./bundle.sh   # guides, charts, CRDs -> $OUT/llm-d-sources-<sha>-<date>.tar.gz
@@ -19,6 +20,9 @@
 #                                                   images are pulled through, so they stay off the mirror list
 #   ROUTER_CRDS=1                                   also fetch the llm-d-router CRDs (InferenceObjective,
 #                                                   InferenceModelRewrite) for flow-control priorities
+#   LWS_CHART=1 [LWS_VERSION=1.0.0]                 also bundle LeaderWorkerSet (P/D, wide-EP): its chart into
+#                                                   .cache/charts/lws-<v>/, its image into the lock and mirror
+#                                                   list; install it air-gapped with ./install-lws.sh
 #   OUT=dist                                        where the tarball and mirror list go
 #   BUNDLE_STEPS='sources images'                   which half to run (default: both)
 #
@@ -27,6 +31,7 @@
 #     .cache/llm-d-<sha>/              pinned llm-d guides
 #     .cache/charts/<chart>-<version>/ router helm charts
 #     .cache/crds/                     InferencePool CRDs (+ llm-d-router.yaml with ROUTER_CRDS=1)
+#     .cache/charts/lws-<v>/           LeaderWorkerSet chart + CRDs (LWS_CHART=1)
 #     .cache/images.lock               "<image> <digest>" for every image the profiles use
 #   images-to-mirror.tsv                "<repo>@<digest> <tab> <target in your registry> <tab> <original>" per image:
 #                                       copy each image from the first column to the second with your own tooling
@@ -41,6 +46,9 @@ die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 source lib/images.sh
 # header comment above `set -euo pipefail`, without the leading "# "
 [[ ${1:-} != -h && ${1:-} != --help ]] || { sed -n '2,/^set -euo pipefail/{/^set /d;s/^# \{0,1\}//;p;}' "$0"; exit 0; }
+# shellcheck source=lib/env.sh
+source "$(dirname "$0")/lib/env.sh"
+env_args "$@"; set -- ${ARGS[@]+"${ARGS[@]}"}   # --env-file / -e anywhere: load + check; ARGS = the rest
 
 PROFILES=("$@"); [[ ${#PROFILES[@]} -gt 0 ]] || PROFILES=(profiles/*.yaml)
 IMAGE_REGISTRY=${IMAGE_REGISTRY:-}
@@ -48,6 +56,9 @@ OUT=${OUT:-dist}
 INFERENCE_CRDS_URL=${INFERENCE_CRDS_URL:-https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/latest/download/v1-manifests.yaml}
 ROUTER_CRDS=${ROUTER_CRDS:-}
 ROUTER_CRDS_URL=${ROUTER_CRDS_URL:-https://github.com/llm-d/llm-d-router/releases/download/v1.0.0/manifests.yaml}
+LWS_CHART=${LWS_CHART:-}
+LWS_VERSION=${LWS_VERSION:-1.0.0}
+LWS_DIR=.cache/charts/lws-$LWS_VERSION
 BUNDLE_STEPS=${BUNDLE_STEPS:-sources images}
 step() { [[ " $BUNDLE_STEPS " == *" $1 "* ]]; }
 step sources || step images || die "BUNDLE_STEPS must contain 'sources' and/or 'images', got '$BUNDLE_STEPS'"
@@ -73,6 +84,13 @@ if step sources; then
     [[ $(yq -N '.kind' .cache/crds/llm-d-router.yaml | grep -v '^---$' | sort -u) == CustomResourceDefinition ]] ||
       die "$ROUTER_CRDS_URL holds more than CRDs"
   fi
+  if [[ -n $LWS_CHART ]]; then
+    log "pulling LeaderWorkerSet chart $LWS_VERSION"
+    rm -rf "$LWS_DIR.tmp"; mkdir -p "$LWS_DIR.tmp"
+    helm pull oci://registry.k8s.io/lws/charts/lws --version "$LWS_VERSION" --untar --untardir "$LWS_DIR.tmp" >/dev/null ||
+      die "cannot pull the LWS chart $LWS_VERSION"
+    rm -rf "$LWS_DIR"; mv "$LWS_DIR.tmp/lws" "$LWS_DIR"; rm -rf "$LWS_DIR.tmp"
+  fi
 fi
 
 if ! step images; then
@@ -85,11 +103,14 @@ if ! step images; then
 fi
 [[ -f .cache/crds/inference-extension-v1.yaml ]] || die "no .cache/crds/: run BUNDLE_STEPS=sources ./bundle.sh first and unpack its tarball here"
 [[ -z $ROUTER_CRDS || -f .cache/crds/llm-d-router.yaml ]] || die "ROUTER_CRDS=1 but no .cache/crds/llm-d-router.yaml: run the sources step with ROUTER_CRDS=1"
+[[ -z $LWS_CHART || -f $LWS_DIR/Chart.yaml ]] || die "LWS_CHART=1 but no $LWS_DIR: run the sources step with LWS_CHART=1"
 
 # ---- 2. lock image digests ------------------------------------------------------------------
 IMAGES=$( { for p in "${PROFILES[@]}"; do n=$(./deploy.sh "$p" --name)
               yq -N '.. | select(tag == "!!map" and has("image")) | .image' ".build/$n/modelserver.yaml" ".build/$n/router.yaml"; done
             echo "$SMOKE_IMAGE"
+            [[ -z $LWS_CHART ]] || helm template lws "$LWS_DIR" --set enableDisaggregatedSet=true |
+              yq -N '.. | select(tag == "!!map" and has("image")) | .image'
           } | grep -v '^$' | while read -r i; do norm_image "$i"; done | sort -u)
 
 # docker buildx when it is real Docker (uses your docker login / mirrors); if that fails (podman's `docker`

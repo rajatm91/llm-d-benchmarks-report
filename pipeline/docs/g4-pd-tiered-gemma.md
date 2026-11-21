@@ -76,11 +76,7 @@ for f in .build/gemma-4-31b-it-pd-tiered-g4-vllm/{modelserver,router}.yaml; do
   yq -N '.. | select(tag == "!!map" and has("image")) | .image' "$f"; done | sort -u
 ```
 
-Air-gapped, LWS needs its own images mirrored too. `bundle.sh` does not cover them. List them from the chart on the connected machine (the GKE Gateway is Google-managed, nothing to mirror):
-
-```bash
-helm template lws oci://registry.k8s.io/lws/charts/lws --version 1.0.0 --set enableDisaggregatedSet=true | grep -E '^\s+image:' | sort -u
-```
+Air-gapped, LWS has one more image: `registry.k8s.io/lws/lws:v1.0.0`. `LWS_CHART=1 ./bundle.sh` locks it and bundles the chart; map `registry.k8s.io` in `IMAGE_REMOTES` (a remote repo with custom upstream `https://registry.k8s.io`) or copy it per the mirror list, then install with `./install-lws.sh` ([4](#4-bundle-the-images-connected-machine)). The GKE Gateway is Google-managed, nothing to mirror.
 
 The model weights are not an image: `fetch-model` copies `gs://models_registry/google__gemma_4_31b_it/` (~63 GB) to each node's local SSD.
 
@@ -256,23 +252,27 @@ To prove the test catches the main mistake, switch the overlay to `.../vllm/gke`
 Air-gapped clusters only. `bundle.sh` locks and lists the five images from [1.2](#12-prerequisites-images) and caches the InferencePool CRD and router chart:
 
 ```bash
-set -a; source envs/prod.env; set +a
-./bundle.sh profiles/gemma-4-31b-pd-tiered-g4-gke.yaml
-grep -E 'vllm-openai:v0.34.0|disagg-sidecar|endpoint-picker:main|google-cloud-cli:slim|curl:8.11.1' .cache/images.lock   # 5 rows
+LWS_CHART=1 ./bundle.sh --env-file prod profiles/gemma-4-31b-pd-tiered-g4-gke.yaml   # LWS_CHART=1: also the LWS chart + image
+grep -E 'vllm-openai:v0.34.0|disagg-sidecar|endpoint-picker:main|google-cloud-cli:slim|curl:8.11.1|lws/lws' .cache/images.lock   # 6 rows
+```
+
+Inside the air gap, install LWS from the bundle once per cluster, before the first deploy:
+
+```bash
+./install-lws.sh --env-file prod --dry-run     # check the image points at your GAR repo
+./install-lws.sh --env-file prod
 ```
 
 GitHub and the image registries on different machines? Run `BUNDLE_STEPS=sources` on the GitHub one and `BUNDLE_STEPS=images` on the registry one, with this profile on both ([deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine)).
 
-Mirror the new rows of `dist/images-to-mirror.tsv` (or use `IMAGE_REMOTES`), as in [deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine). Mirror the LWS images from [1.2](#12-prerequisites-images) separately. `ROUTER_CRDS=1` is not needed.
+Mirror the new rows of `dist/images-to-mirror.tsv` (or use `IMAGE_REMOTES`), as in [deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine). `ROUTER_CRDS=1` is not needed.
 
 ---
 
 ## 5. Deploy and verify
 
 ```bash
-set -a; source envs/prod.env; set +a
-kubectl config current-context
-./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-gke.yaml
+./deploy.sh --env-file prod profiles/gemma-4-31b-pd-tiered-g4-gke.yaml   # logs the env file, kubectl context and namespace first
 ```
 
 Preflight stops early if LWS or the `DisaggregatedSet` CRD is missing. The first start downloads ~63 GB of weights to each node's local SSD; both pods on a node share that copy.

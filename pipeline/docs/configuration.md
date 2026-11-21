@@ -45,6 +45,8 @@ These describe the target, not the model, so they live in `envs/<env>.env` (copy
 | `INFERENCE_CRDS_URL` | GAIE `releases/latest/.../v1-manifests.yaml` | bundle | InferencePool CRDs cached into `.cache/crds/`. |
 | `ROUTER_CRDS` | unset | bundle | `1` = also cache the llm-d-router CRDs (`InferenceObjective`, `InferenceModelRewrite`) as `.cache/crds/llm-d-router.yaml`. Needed for flow-control priorities. |
 | `ROUTER_CRDS_URL` | llm-d-router `releases/download/v1.0.0/manifests.yaml` | bundle | Where those come from. Must hold CRDs only. |
+| `LWS_CHART` | unset | bundle | `1` = also bundle LeaderWorkerSet: chart (with CRDs) into `.cache/charts/lws-<LWS_VERSION>/`, image `registry.k8s.io/lws/lws` into the lock and mirror list. Install it air-gapped with `./install-lws.sh`. |
+| `LWS_VERSION` | `1.0.0` | bundle, install-lws | LWS chart version (P/D needs ≥ 0.11.1). |
 
 ## 3. Profile fields
 
