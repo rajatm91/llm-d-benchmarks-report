@@ -127,9 +127,15 @@ add_vllm_args() {
 
   ARGS=$MS_ARGS_JSON RE='(?P<pre>\s)'$(helper re_escape "$MODEL")'(?P<end>[\s\\]|$)' \
     REPL="\${pre}${MODEL//\$/\$\$} $(helper shell_args "$MS_ARGS_JSON")\${end}" yq_edit vllm-args "$MS"
-  local first; first=$(yq -r '.[0]' <<<"$MS_ARGS_JSON")
-  [[ $(vllm_cmds | grep -oF -- "${first%%=*}" | wc -l) -eq $(vllm_cmds | grep -oE 'vllm[[:space:]]+serve' | wc -l) ]] ||
-    die "extra vLLM args must land exactly once per 'vllm serve' (model id appears elsewhere in the script?); use modelserver.patches"
+  # List-form containers just get the args appended. Script-form ones (bash -c "... vllm serve <model> ...") get
+  # them inserted after the model id, which goes wrong if the id is missing or appears twice in the script:
+  # the inserted text must appear exactly once per `vllm serve` in those scripts. Repeating a flag the overlay
+  # already sets is fine (vLLM keeps the last value).
+  local scripts ins
+  scripts=$(yq -N "$VLLM_POD | .containers[] | select($VLLM_CTR) | ((.command // [])[], (.args // [])[]) | select(test(\"vllm\\\\s+serve\"))" "$MS")
+  ins="$MODEL $(helper shell_args "$MS_ARGS_JSON")"
+  [[ $(grep -oF -- "$ins" <<<"$scripts" | wc -l) -eq $(grep -oE 'vllm[[:space:]]+serve' <<<"$scripts" | wc -l) ]] ||
+    die "extra vLLM args must land exactly once per 'vllm serve' in script-form containers (model id missing or repeated in the script?); use modelserver.patches"
 }
 
 # Weights from GCS. lib/fetch-model.sh lays each model out as a Hugging Face cache entry
