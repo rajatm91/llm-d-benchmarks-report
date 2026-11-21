@@ -241,7 +241,7 @@ set -a; source envs/prod.env; set +a        # IMAGE_REGISTRY + IMAGE_TEMPLATE fi
 # machine A (GitHub, ghcr.io charts): llm-d guides, router charts, CRDs -> dist/llm-d-sources-<sha>-<date>.tar.gz
 BUNDLE_STEPS=sources ./bundle.sh profiles/<it>.yaml
 
-# machine B (docker.io, ghcr.io, gcr.io via docker buildx): no GitHub needed
+# machine B (docker.io, ghcr.io, gcr.io; docker buildx, or plain curl on podman machines): no GitHub needed
 tar -xzf llm-d-sources-<sha>-<date>.tar.gz -C pipeline && cd pipeline
 set -a; source envs/prod.env; set +a
 BUNDLE_STEPS=images ./bundle.sh profiles/<it>.yaml     # digests, mirror list, final llm-d-bundle tarball

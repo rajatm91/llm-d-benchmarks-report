@@ -92,8 +92,13 @@ IMAGES=$( { for p in "${PROFILES[@]}"; do n=$(./deploy.sh "$p" --name)
             echo "$SMOKE_IMAGE"
           } | grep -v '^$' | while read -r i; do norm_image "$i"; done | sort -u)
 
-docker buildx version >/dev/null 2>&1 || die "need docker buildx to resolve image digests"
-digest() { docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' | tr -d '"'; }
+# docker buildx when it is real Docker (uses your docker login / mirrors); if that fails (podman's `docker`
+# has no `buildx imagetools`, or no docker at all), ask the registry directly with curl (public images).
+digest() {
+  local d
+  d=$(docker buildx imagetools inspect "$1" --format '{{json .Manifest.Digest}}' 2>/dev/null | tr -d '"') && [[ $d == sha256:* ]] &&
+    echo "$d" || registry_digest "$1"
+}
 log "resolving $(wc -l <<<"$IMAGES" | tr -d ' ') image digests"
 : > .cache/images.lock.tmp
 while read -r img; do
