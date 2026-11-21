@@ -49,7 +49,7 @@ set -a; source envs/prod.env; set +a   # IMAGE_REGISTRY + IMAGE_TEMPLATE: where 
 ```
 1. **Renders every profile.** This fills `.cache/` (the pinned llm-d guides, the router chart under `.cache/charts/`, the InferencePool CRDs under `.cache/crds/`) and `.build/`.
 2. **Locks image digests.** Every image the renders use, plus the smoke-test image, is resolved to a digest in `.cache/images.lock`. Moving tags like `:main`, `:nightly` and `:latest` are frozen there.
-3. **Writes the mirror list** `dist/images-to-mirror.tsv`: `repo@digest <tab> target in your registry <tab> original` per image. Copy the images into GAR yourself, from the first column to the second. `bundle.sh` never copies images; it needs `docker buildx` only to resolve digests.
+3. **Writes the mirror list** `dist/images-to-mirror.tsv`: `repo@digest <tab> target in your registry <tab> original` per image. Copy the images into GAR yourself, from the first column to the second. `bundle.sh` never copies images; it resolves digests with `docker buildx` if that works, else straight from the registries with `curl` (so podman machines work too).
 4. **Packs** this directory, including `.cache/`, into `dist/llm-d-bundle-<llmd sha>-<date>.tar.gz`.
 
 `IMAGE_TEMPLATE` sets the layout in your registry (`lib/images.sh`). For `docker.io/vllm/vllm-openai:v0.34.0`:

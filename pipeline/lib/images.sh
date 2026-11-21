@@ -48,3 +48,26 @@ image_target() {
   t=${t//\{name\}/${path##*/}};             t=${t//\{tag\}/$tag};   t=${t//\{digest\}/$dig}
   echo "$t"
 }
+
+# registry_digest <normalized image>  -> sha256:... of what the tag points at (the multi-arch index if any),
+# straight from the registry's v2 API with an anonymous pull token. Needs only curl + python3, so it
+# works where `docker` is podman (no `buildx imagetools --format`) and no crane/skopeo is installed.
+registry_digest() {
+  local img=$1 repo tag host rpath api url auth realm service tok hdr
+  [[ $img != *@sha256:* ]] || { echo "${img##*@}"; return; }
+  repo=$img; tag=latest
+  [[ ${repo##*/} == *:* ]] && { tag=${repo##*:}; repo=${repo%:*}; }
+  host=${repo%%/*} rpath=${repo#*/}
+  api=$host; [[ $host == docker.io ]] && api=registry-1.docker.io
+  url=https://$api/v2/$rpath/manifests/$tag
+  local accept=application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json
+  if ! hdr=$(curl -fsSIL -H "Accept: $accept" "$url" 2>/dev/null); then
+    # 401: the WWW-Authenticate header names the token service; ask it for an anonymous pull token
+    auth=$(curl -sSI -H "Accept: $accept" "$url" | tr -d '\r' | grep -i '^www-authenticate: *bearer') || return 1
+    realm=$(sed -nE 's/.*realm="([^"]+)".*/\1/p' <<<"$auth"); service=$(sed -nE 's/.*service="([^"]+)".*/\1/p' <<<"$auth")
+    tok=$(curl -fsS -G "$realm" ${service:+--data-urlencode "service=$service"} --data-urlencode "scope=repository:$rpath:pull" |
+      python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("token") or d["access_token"])') || return 1
+    hdr=$(curl -fsSIL -H "Accept: $accept" -H "Authorization: Bearer $tok" "$url") || return 1
+  fi
+  tr -d '\r' <<<"$hdr" | grep -i '^docker-content-digest:' | tail -1 | awk '{print $2}'
+}
