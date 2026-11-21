@@ -219,21 +219,24 @@ add_epp_monitoring() {
 }
 
 # ROUTER_SERVICE_ACCOUNT: the router uses a pre-existing ServiceAccount instead of creating its own. The chart
-# has no option for it, so drop every ServiceAccount it renders (<name>-epp) and point everything that names
-# them at the given one: the EPP Deployment, RBAC binding subjects, and any token Secret. The chart's
-# Roles/ClusterRoles are still created and bound to it.
+# has no option for it, so drop every ServiceAccount it renders (<name>-epp) and point the EPP Deployment and
+# RBAC binding subjects at the given one. The chart's Roles/ClusterRoles are still created and bound to it.
+# Never retargets a service-account-token Secret: that would mint a long-lived token for the operator's existing
+# account (e.g. one with Workload Identity access). Such a render is refused instead.
 use_router_sa() {
   [[ -n $ROUTER_SERVICE_ACCOUNT ]] || return 0
   local old; old=$(yq -N 'select(.kind == "ServiceAccount") | .metadata.name' "$ROUTER" | sort -u)
   [[ -n $old ]] || die "router render has no ServiceAccount to replace with $ROUTER_SERVICE_ACCOUNT"
+  local tok; tok=$(OLD=$(echo $old) yq -N '(strenv(OLD) | split(" ")) as $old |
+    select(.kind == "Secret" and .type == "kubernetes.io/service-account-token" and
+           ([.metadata.annotations."kubernetes.io/service-account.name"] - $old | length) == 0) | .metadata.name' "$ROUTER")
+  [[ -z $tok ]] || die "router render has a token Secret ($(echo $tok)) for a ServiceAccount ROUTER_SERVICE_ACCOUNT would replace; refusing to mint a token for $ROUTER_SERVICE_ACCOUNT. Use MONITORING=gmp (EPP metrics without auth) instead of the chart's token-based monitoring, or unset ROUTER_SERVICE_ACCOUNT"
   log "router uses existing ServiceAccount $ROUTER_SERVICE_ACCOUNT (not creating $(echo $old))"
   OLD=$(echo $old) SA=$ROUTER_SERVICE_ACCOUNT yq -i '
     (strenv(OLD) | split(" ")) as $old |
     select(.kind != "ServiceAccount" or ([.metadata.name] - $old | length) == 1) |
     (.. | select(tag == "!!map" and has("serviceAccountName") and ([.serviceAccountName] - $old | length) == 0) | .serviceAccountName) = strenv(SA) |
-    (select(has("subjects")) | .subjects[] | select(.kind == "ServiceAccount" and ([.name] - $old | length) == 0) | .name) = strenv(SA) |
-    (select(.kind == "Secret" and .metadata.annotations."kubernetes.io/service-account.name" != null and ([.metadata.annotations."kubernetes.io/service-account.name"] - $old | length) == 0)
-      | .metadata.annotations."kubernetes.io/service-account.name") = strenv(SA)' "$ROUTER"
+    (select(has("subjects")) | .subjects[] | select(.kind == "ServiceAccount" and ([.name] - $old | length) == 0) | .name) = strenv(SA)' "$ROUTER"
   local o; for o in $old; do
     ! grep -qxF -- "$o" <(yq -N '.. | select(tag == "!!map") | (.serviceAccountName // ""), ((.subjects // [])[] | select(.kind == "ServiceAccount") | .name), (.metadata.annotations."kubernetes.io/service-account.name" // ""), (select(.kind == "ServiceAccount") | .metadata.name)' "$ROUTER") ||
       die "router render still refers to ServiceAccount $o"

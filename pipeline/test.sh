@@ -204,6 +204,11 @@ w=$(./deploy.sh profiles/wide-ep-gke.yaml --name); MONITORING=gmp ./deploy.sh pr
 [[ $(yq -N 'select(.kind == "PodMonitoring") | .spec.endpoints | map(.port) | join(" ")' ".build/$w/modelserver.yaml") == *rank7* &&
    $(yq -N 'select(.kind == "PodMonitoring") | .spec.endpoints | map(.port) | join(" ")' ".build/$w/modelserver.yaml") != *supervisor* ]] ||
   fail monitoring "wide-EP PodMonitoring should scrape every rank port, not the supervisor"
+# never mint a token for the operator's ServiceAccount: chart token-based EPP monitoring + ROUTER_SERVICE_ACCOUNT is refused
+yq '.router.values += ["guides/recipes/router/features/monitoring-gke.values.yaml"]' "$P" > "$T/tokmon.yaml"
+out=$(ROUTER_SERVICE_ACCOUNT=existing-sa ./deploy.sh "$T/tokmon.yaml" --dry-run 2>&1) && fail monitoring "token Secret retargeted to ROUTER_SERVICE_ACCOUNT instead of refused"
+[[ $out == *"refusing to mint a token for existing-sa"* ]] || fail monitoring "wrong refusal: ${out##*ERROR}"
+./deploy.sh "$T/tokmon.yaml" --dry-run >/dev/null 2>&1 || fail monitoring "chart token monitoring without ROUTER_SERVICE_ACCOUNT should still render"
 echo "ok  MONITORING=gmp PodMonitoring for vLLM and EPP"
 
 # bundle.sh split: an unknown step is refused before any network access
