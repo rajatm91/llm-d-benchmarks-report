@@ -183,6 +183,7 @@ render_router() {
     helm pull "$chart" --version "$ROUTER_CHART_VERSION" --untar --untardir "$dir.tmp" >/dev/null || die "cannot pull $chart; $OFFLINE_HINT"
     rm -rf "$dir"; mv "$dir.tmp/$(basename "$chart")" "$dir"; rm -rf "$dir.tmp"
   fi
+  drop_mac_junk "$dir"
   log "rendering router ($chart:$ROUTER_CHART_VERSION, pool selector llm-d.ai/deployment=$NAME)"
   helm template "$NAME" "$dir" "${args[@]}" > "$ROUTER"
   # label everything the router render creates, so it can be found / deleted as one unit

@@ -71,3 +71,10 @@ registry_digest() {
   fi
   tr -d '\r' <<<"$hdr" | grep -i '^docker-content-digest:' | tail -1 | awk '{print $2}'
 }
+
+# drop_mac_junk <dir>: delete macOS ._<file> / .DS_Store files (from a bundle made or copied on a Mac).
+# Helm treats every file under templates/ as a template, and ._* files are binary.
+drop_mac_junk() {
+  local n; n=$(find "$1" \( -name '._*' -o -name .DS_Store \) -type f -print -delete | wc -l | tr -d ' ')
+  [[ $n -eq 0 ]] || log "removed $n macOS metadata files (._*, .DS_Store) from $1"
+}

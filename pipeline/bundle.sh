@@ -44,6 +44,12 @@ log() { printf '\033[1;34m==> %s\033[0m\n' "$*" >&2; }
 die() { printf '\033[1;31mERROR: %s\033[0m\n' "$*" >&2; exit 1; }
 # shellcheck source=lib/images.sh
 source lib/images.sh
+# pack <tarball> [tar options]: this directory without $OUT, .git and macOS junk. COPYFILE_DISABLE stops
+# macOS tar from adding ._<file> (AppleDouble) entries; on Linux, Helm reads those as broken templates.
+pack() {
+  local tar=$1; shift
+  COPYFILE_DISABLE=1 tar -czf "$tar" --exclude="./$OUT" --exclude='./.git' --exclude='._*' --exclude='.DS_Store' "$@" -C "$ROOT" .
+}
 # header comment above `set -euo pipefail`, without the leading "# "
 [[ ${1:-} != -h && ${1:-} != --help ]] || { sed -n '2,/^set -euo pipefail/{/^set /d;s/^# \{0,1\}//;p;}' "$0"; exit 0; }
 # shellcheck source=lib/env.sh
@@ -97,7 +103,7 @@ if ! step images; then
   mkdir -p "$OUT"
   TAR=$OUT/llm-d-sources-${LLMD_REF:0:7}-$(date +%Y%m%d).tar.gz
   log "packing $TAR"
-  tar -czf "$TAR" --exclude="./$OUT" --exclude='./.git' --exclude='./.build' -C "$ROOT" .
+  pack "$TAR" --exclude='./.build'
   log "done: $TAR; on the registry machine: unpack into pipeline/, then BUNDLE_STEPS=images ./bundle.sh"
   exit 0
 fi
@@ -152,5 +158,5 @@ log "mirror list: $OUT/images-to-mirror.tsv ($(($(wc -l < "$OUT/images-to-mirror
 # ---- 4. pack --------------------------------------------------------------------------------
 TAR=$OUT/llm-d-bundle-${LLMD_REF:0:7}-$(date +%Y%m%d).tar.gz
 log "packing $TAR"
-tar -czf "$TAR" --exclude="./$OUT" --exclude='./.git' -C "$ROOT" .
+pack "$TAR"
 log "done: $TAR ($(du -h "$TAR" | cut -f1)); copy the images per $OUT/images-to-mirror.tsv"
