@@ -9,7 +9,7 @@ Prerequisites: [prerequisites.md](../prerequisites.md), **LWS with `enableDisagg
 - [1. When P/D pays off](#1-when-pd-pays-off)
 - [2. Plain P/D](#2-plain-pd)
 - [3. Verify the split](#3-verify-the-split)
-- [4. P/D + CPU tier on prefill (combo)](#4-pd--cpu-tier-on-prefill-combo)
+- [4. P/D with a CPU tier on prefill (combo)](#4-pd-with-a-cpu-tier-on-prefill-combo)
 - [5. Change what the overlay hard-codes](#5-change-what-the-overlay-hard-codes)
 
 ## 1. When P/D pays off
@@ -69,7 +69,7 @@ kubectl logs -n llm-d -l llm-d.ai/deployment=$N,llm-d.ai/role=decode -c modelser
 
 Decode pods also run a `routing-proxy` sidecar: it receives the request, asks the chosen prefill pod to compute the KV cache, and pulls it over NIXL.
 
-## 4. P/D + CPU tier on prefill (combo)
+## 4. P/D with a CPU tier on prefill (combo)
 
 Prefix reuse happens on prefill, so that is where a CPU tier helps. Two llm-d guides are combined:
 

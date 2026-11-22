@@ -5,7 +5,7 @@ Large mixture-of-experts models (DeepSeek, GLM, Kimi) spread their experts acros
 Prerequisites: [prerequisites.md](../prerequisites.md), **LWS with `enableDisaggregatedSet=true`**, and a **full-mesh RDMA fabric** (InfiniBand or GPUDirect-RDMA; rail-only topologies fail). Each node's local SSD must hold the model.
 
 - [1. DeepSeek-R1 on the wide-EP guide](#1-deepseek-r1-on-the-wide-ep-guide)
-- [2. GLM-5.2: wide-EP + P/D + tiered KV (upstream recipe)](#2-glm-52-wide-ep--pd--tiered-kv-upstream-recipe)
+- [2. GLM-5.2: wide-EP, P/D and tiered KV (upstream recipe)](#2-glm-52-wide-ep-pd-and-tiered-kv-upstream-recipe)
 - [3. Verify](#3-verify)
 - [4. Changing the shape](#4-changing-the-shape)
 
@@ -48,7 +48,7 @@ yq 'select(.kind=="InferencePool") | .spec.targetPorts' .build/deepseek-r1-0528-
 
 The first start downloads ~700 GB per node in parallel; set `waitTimeout: 120m` in the profile if 60 minutes is not enough.
 
-## 2. GLM-5.2: wide-EP + P/D + tiered KV (upstream recipe)
+## 2. GLM-5.2: wide-EP, P/D and tiered KV (upstream recipe)
 
 When llm-d ships a recipe for your model under `guides/models/`, use it: it composes wide-EP, P/D, KV offload (CPU + local NVMe) and MTP, tuned for that model. The pipeline only adds naming, weights and images.
 

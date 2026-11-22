@@ -7,7 +7,7 @@ Prerequisite: [guide 01](01-first-deployment.md) works on your cluster (Gateway,
 - [1. The workflow for any new model](#1-the-workflow-for-any-new-model)
 - [2. Swap the model: Gemma 4 31B](#2-swap-the-model-gemma-4-31b)
 - [3. Speculative decoding](#3-speculative-decoding)
-- [4. One GPU per node: 5 × g4-standard-48](#4-one-gpu-per-node-5--g4-standard-48)
+- [4. One GPU per node (g4-standard-48)](#4-one-gpu-per-node-g4-standard-48)
 - [5. Pin the llm-d and vLLM versions](#5-pin-the-llm-d-and-vllm-versions)
 
 ## 1. The workflow for any new model
@@ -126,7 +126,7 @@ Notes:
 
 **Check:** `grep -- --speculative-config .build/<name>/modelserver.yaml`, then after deploy, the vLLM log shows the speculative config and, under load, acceptance rate metrics.
 
-## 4. One GPU per node: 5 × g4-standard-48
+## 4. One GPU per node (g4-standard-48)
 
 A `g4-standard-48` has **one** NVIDIA RTX PRO 6000 (96 GB). Gemma 4 31B in BF16 fits on it, so run one whole-GPU replica per node (TP across nodes would go over the network). This also shows a newer vLLM image.
 
@@ -187,7 +187,7 @@ Pinning "llm-d 1.0" means pinning three things, because each has its own default
 | EPP image | `router.set: [router.epp.image.tag=v1.0.0]` | `v1.0.0` | `:main`, even in the v1.0.0 chart |
 | vLLM | `modelserver.image` | `vllm-openai:v0.34.0` | the overlay's image (llm-d 1.0 ships v0.31.0) |
 
-Gemma 4 31B on llm-d 1.0 with vLLM v0.34.0, sized for the pool from [4](#4-one-gpu-per-node-5--g4-standard-48):
+Gemma 4 31B on llm-d 1.0 with vLLM v0.34.0, sized for the pool from [4](#4-one-gpu-per-node-g4-standard-48):
 
 ```yaml
 # profile: profiles/gemma-4-31b-llmd-1.0-vllm-0.34-agentgateway.yaml
