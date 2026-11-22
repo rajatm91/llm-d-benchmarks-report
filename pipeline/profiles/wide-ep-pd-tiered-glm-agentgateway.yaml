@@ -6,6 +6,9 @@ model: zai-org/GLM-5.2-FP8
 strategy: wide-ep-pd-tiered
 modelserver:
   overlay: guides/models/glm-5-2/modelserver/gpu/vllm/deployments/default
+  kvCache:                     # per DP rank (one router endpoint per rank); docs/fine-tuning.md
+    gpuTokens: 236800          # ESTIMATE from the guide's notes (~3,700 blocks per H200 rank); use the startup log
+    bytesPerToken: 61464       # GLM-5.2-FP8: 78 layers x (656 B MLA + 132 B indexer)
 router:
   values:
     - guides/models/glm-5-2/router/glm-5-2.values.yaml

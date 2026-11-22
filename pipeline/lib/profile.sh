@@ -19,6 +19,7 @@ DRAFT_MODEL=""                 # HF id of a draft / EAGLE model for speculative 
 SPEC_CONFIG='{"num_speculative_tokens": 5}'   # vLLM --speculative-config; "model" is filled from DRAFT_MODEL
 MS_ARGS_JSON='[]'; MS_TP=""; MS_REPLICAS=""   # modelserver.args / tensorParallel / replicas
 MS_IMAGE=""                    # modelserver.image: replaces the overlay's vLLM image
+KV_GPU_TOKENS=""; KV_BYTES_PER_TOKEN=""   # modelserver.kvCache: sizes the router's fixed prefix indexes (render.sh)
 
 # ---- environment (the same for every profile; envs/<env>.env or Jenkins) ------------
 NAMESPACE=${NAMESPACE:-llm-d}                           # shared by every model
@@ -46,7 +47,8 @@ load_profile() {
   local bad
   bad=$(yq -N '(keys - ["model","modelAlias","strategy","draftModel","speculativeConfig",
                         "modelserver","router","gateway","weights","llmdRef","waitTimeout"])
-    + ((.modelserver // {}) | keys - ["overlay","components","patches","args","tensorParallel","replicas","image"] | map("modelserver." + .))
+    + ((.modelserver // {}) | keys - ["overlay","components","patches","args","tensorParallel","replicas","image","kvCache"] | map("modelserver." + .))
+    + ((.modelserver.kvCache // {}) | keys - ["gpuTokens","bytesPerToken"] | map("modelserver.kvCache." + .))
     + ((.router // {}) | keys - ["mode","values","set","chartVersion"] | map("router." + .))
     + ((.gateway // {}) | keys - ["provider","name","namespace","baseModel","timeoutSec"] | map("gateway." + .))
     + ((.weights // {}) | keys - ["gcsUri"] | map("weights." + .)) | .[]' "$PROFILE")
@@ -61,6 +63,7 @@ load_profile() {
       ["PATCHES", (.modelserver.patches | select(. != null) | join(" "))],
       ["MS_ARGS_JSON", (.modelserver.args | select(. != null) | @json)],
       ["MS_TP", .modelserver.tensorParallel], ["MS_REPLICAS", .modelserver.replicas], ["MS_IMAGE", .modelserver.image],
+      ["KV_GPU_TOKENS", .modelserver.kvCache.gpuTokens], ["KV_BYTES_PER_TOKEN", .modelserver.kvCache.bytesPerToken],
       ["ROUTER_MODE", .router.mode], ["ROUTER_CHART_VERSION", .router.chartVersion],
       ["ROUTER_VALUES", (.router.values | select(. != null) | join(" "))],
       ["ROUTER_SET", (.router.set | select(. != null) | join(" "))],
@@ -93,7 +96,7 @@ slug() { tr '[:upper:]' '[:lower:]' <<<"$1" | sed -E 's/[^a-z0-9]+/-/g; s/^-+//;
 print_env() {
   local v
   for v in NAME NAMESPACE SERVICE_ACCOUNT ROUTER_SERVICE_ACCOUNT MONITORING MODEL STRATEGY ENGINE DRAFT_MODEL SPEC_CONFIG MODELSERVER_OVERLAY COMPONENTS PATCHES \
-           ROUTER_MODE ROUTER_VALUES MS_TP MS_REPLICAS MS_ARGS_JSON MS_IMAGE SPEC_SET GATEWAY_PROVIDER GATEWAY_NAME GATEWAY_NAMESPACE \
+           ROUTER_MODE ROUTER_VALUES MS_TP MS_REPLICAS MS_ARGS_JSON MS_IMAGE KV_GPU_TOKENS KV_BYTES_PER_TOKEN SPEC_SET GATEWAY_PROVIDER GATEWAY_NAME GATEWAY_NAMESPACE \
            BASE_MODEL GATEWAY_TIMEOUT MODEL_BUCKET LLMD_REF WAIT_TIMEOUT SMOKE_IMAGE; do
     printf '%s=%q\n' "$v" "${!v}"
   done

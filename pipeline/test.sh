@@ -197,6 +197,35 @@ yq '.gateway.timeoutSec = "15m"' profiles/gemma-4-31b-pd-tiered-g4-gke.yaml > "$
 ! ./deploy.sh "$T/to.yaml" --dry-run >/dev/null 2>&1 || fail timeout "non-numeric timeoutSec should fail"
 echo "ok  gateway.timeoutSec"
 
+# modelserver.kvCache: lruCapacityPerServer of fixed prefix indexes = GPU blocks (if no autoTune index covers the
+# GPU) + CPU tier / (64 x bytesPerToken); CPU tier from cpu_bytes_to_use, literal or ${VAR:-default} + env
+lru() { yq -N 'select(.kind == "ConfigMap") | .data[] | select(test("approx-prefix-cache-producer")) | from_yaml |
+  .plugins[] | select(.type == "approx-prefix-cache-producer" and .parameters.autoTune == false) | .parameters.lruCapacityPerServer' ".build/$1/router.yaml"; }
+for c in "tiered-cpu-gke 0 262144 $((322122547200 / (64 * 262144)))" \
+         "pd-tiered-cpu-agentgateway 640000 73728 $((640000 / 64 + 107374182400 / (64 * 73728)))" \
+         "wide-ep-pd-tiered-glm-agentgateway 6400 61464 $((6400 / 64 + 107374182400 / (64 * 61464)))"; do
+  read -r p g b want <<<"$c"
+  yq ".modelserver.kvCache = {\"gpuTokens\": $g, \"bytesPerToken\": $b} | del(.modelserver.kvCache.gpuTokens | select(. == 0))" "profiles/$p.yaml" > "$T/kv.yaml"
+  n=$(./deploy.sh "$T/kv.yaml" --name)
+  ./deploy.sh "$T/kv.yaml" --dry-run >/dev/null 2>&1 || fail kvcache "$p: render failed"
+  [[ $(lru "$n") == "$want" ]] || fail kvcache "$p: lruCapacityPerServer $(lru "$n" | xargs), want $want"
+done
+for k in gpuTokens bytesPerToken; do
+  yq "del(.modelserver.kvCache.$k)" profiles/pd-tiered-cpu-agentgateway.yaml > "$T/kv.yaml"
+  n=$(./deploy.sh "$T/kv.yaml" --name)
+  out=$(./deploy.sh "$T/kv.yaml" --dry-run 2>&1) && [[ $out == *"WARNING: modelserver.kvCache.{$k}"* ]] ||
+    fail kvcache "missing kvCache.$k should warn naming it, not fail"
+  [[ $(lru "$n") == 35700 ]] || fail kvcache "missing kvCache.$k: lruCapacityPerServer $(lru "$n" | xargs), want the values file's 35700"
+done
+yq '.modelserver.kvCache.gpuToken = 1' profiles/pd-tiered-cpu-agentgateway.yaml > "$T/kv.yaml"
+! ./deploy.sh "$T/kv.yaml" --dry-run >/dev/null 2>&1 || fail kvcache "unknown kvCache key should fail"
+# --kv-cache log parsing: TP=2 engine (2 rank lines, 1 size line) -> bytesPerToken = 2 x 12 GiB / 100,000
+got=$(printf '%s\n' '(VllmWorker TP0) INFO Available KV cache memory: 12.00 GiB' '(VllmWorker TP1) INFO Available KV cache memory: 12.00 GiB' \
+  '(EngineCore) INFO GPU KV cache size: 100,000 tokens' | bash -c 'source lib/cluster.sh; kv_cache_from_log p')
+[[ $got == "p: kvCache: {gpuTokens: 100000, bytesPerToken: $((2 * 12 * 1073741824 / 100000))}" ]] || fail kvcache "log parse: $got"
+! echo 'no kv lines' | bash -c 'source lib/cluster.sh; kv_cache_from_log p' >/dev/null || fail kvcache "log without KV lines should exit 1"
+echo "ok  modelserver.kvCache sizes fixed prefix indexes"
+
 # ROUTER_SERVICE_ACCOUNT: no ServiceAccount rendered; EPP Deployment and all binding subjects use the given one
 P=profiles/gemma-4-31b-pd-tiered-g4-gke.yaml; n=$(./deploy.sh "$P" --name)
 ROUTER_SERVICE_ACCOUNT=existing-sa ./deploy.sh "$P" --dry-run >/dev/null 2>&1 || fail router-sa "render failed"

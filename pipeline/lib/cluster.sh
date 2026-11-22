@@ -95,3 +95,25 @@ delete_all() {
   kubectl delete -n "$NAMESPACE" -f "$MS" --ignore-not-found
   kubectl delete -n "$NAMESPACE" -f "$ROUTER" --ignore-not-found
 }
+
+# modelserver.kvCache measured from each model-server pod's vLLM startup log (docs/fine-tuning.md):
+#   gpuTokens     = "GPU KV cache size: N tokens" (logged per engine = per DP rank = per router endpoint)
+#   bytesPerToken = sum of every rank's "Available KV cache memory: X GiB" / sum of N (covers TP and DP)
+kv_cache_report() {
+  local pod found=
+  for pod in $(kubectl get pod -n "$NAMESPACE" -l "llm-d.ai/deployment=$NAME" -o name); do
+    kubectl logs -n "$NAMESPACE" "$pod" --all-containers 2>/dev/null | kv_cache_from_log "${pod#pod/}" && found=1
+  done
+  [[ -n $found ]] || { log "kvCache: no 'GPU KV cache size' line in any model-server log yet (still starting, or logs rotated)"; return 0; }
+  log "kvCache: profile has {gpuTokens: ${KV_GPU_TOKENS:-unset}, bytesPerToken: ${KV_BYTES_PER_TOKEN:-unset}}; P/D: use the prefill pod's line"
+}
+
+# vLLM log on stdin -> "<label>: kvCache: {...}"; exit 1 when the log has no KV cache lines
+kv_cache_from_log() {
+  awk -v pod="$1" '
+    /GPU KV cache size:/ { s = $0; sub(/.*GPU KV cache size: */, "", s); gsub(/,/, "", s); n = s + 0
+                           tok += n; if (!min || n < min) min = n }
+    /Available KV cache memory:/ { s = $0; sub(/.*Available KV cache memory: */, "", s); gib += s + 0 }
+    END { if (!tok || !gib) exit 1
+          printf "%s: kvCache: {gpuTokens: %d, bytesPerToken: %d}\n", pod, min, gib * 1073741824 / tok }'
+}

@@ -78,6 +78,8 @@ Every resource is named `<model>-<strategy>-<engine>` (engine from the overlay p
 | `args` | `[]` | Extra `vllm serve` flags. Flags tied to the overlay's reference model are dropped first. |
 | `tensorParallel` | overlay's | Aggregated (Deployment) overlays only. Sets `--tensor-parallel-size` and the GPU count. |
 | `replicas` | overlay's | Aggregated overlays only. For P/D and wide-EP, use `patches`. |
+| `kvCache.gpuTokens` | | Used when the router config has a fixed-size (`autoTune: false`) prefix index that also covers GPU blocks (e.g. `combos/pd-tiered-cpu`, GLM-5.2). vLLM's `GPU KV cache size: N tokens` startup line, per router endpoint (per DP rank on wide-EP). |
+| `kvCache.bytesPerToken` | | Used when such an index covers a CPU KV tier (`cpu_bytes_to_use`). KV bytes per token for the whole model (all TP ranks). With the needed ones set, the render sets `lruCapacityPerServer`; unset, it warns and keeps the values file's number. A deploy (or `./deploy.sh <profile> --kv-cache`) prints both, measured from the vLLM logs; see [fine-tuning.md](fine-tuning.md). |
 
 ### Speculative decoding
 
@@ -167,7 +169,7 @@ The pipeline always sets these, so values files can't change them: `router.model
 | `features/agentgateway-proxy.values.yaml` | `router.mode: standalone` with an agentgateway sidecar instead of Envoy |
 | `features/httproute-flags.yaml` | Upstream's HTTPRoute flags; the pipeline already sets these, don't add it |
 
-`guides/recipes/router/calibration/*.yaml` are not values files: they are ConfigMaps with scripts that measure a running deployment (peak prefill throughput, cached-token delta) to tune scorer weights.
+`guides/recipes/router/calibration/*.yaml` are not values files: they are ConfigMaps with scripts that measure a running deployment and print the hardware-specific plugin parameters `peakPrefillThroughput` and `minCachedTokenDelta` (not scorer weights). See [fine-tuning.md](fine-tuning.md).
 
 Your own values file can sit anywhere in this repo (e.g. `combos/<name>/router.values.yaml`). The usual reason to write one is to change the EPP's plugin config (`router.epp.pluginsCustomConfig`): copy the guide's file, edit, and point `router.values` at your copy.
 

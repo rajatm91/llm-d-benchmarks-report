@@ -6,6 +6,7 @@
 #   ./deploy.sh profiles/<name>.yaml --delete   # tear down router + model servers
 #   ./deploy.sh profiles/<name>.yaml --name     # print the derived deployment name
 #   ./deploy.sh profiles/<name>.yaml --env      # print the resolved settings as shell assignments
+#   ./deploy.sh profiles/<name>.yaml --kv-cache # print modelserver.kvCache measured from the running pods' vLLM logs
 #   ./deploy.sh --help                          # this text
 #
 # Load the environment settings with --env-file (or -e), anywhere on the line:
@@ -33,7 +34,7 @@ source "$(dirname "$0")/lib/env.sh"
 env_args "$@"; set -- ${ARGS[@]+"${ARGS[@]}"}   # --env-file / -e anywhere: load + check; ARGS = the rest
 [[ $# -ge 1 && $# -le 2 ]] || usage
 MODE=${2:-deploy}
-[[ $MODE =~ ^(deploy|--dry-run|--delete|--name|--env)$ ]] || usage
+[[ $MODE =~ ^(deploy|--dry-run|--delete|--name|--env|--kv-cache)$ ]] || usage
 PROFILE=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
 ROOT=$(cd "$(dirname "$0")" && pwd)
 LIB=$ROOT/lib
@@ -50,6 +51,7 @@ load_profile
 case $MODE in
   --name) echo "$NAME"; exit 0 ;;
   --env)  print_env;    exit 0 ;;
+  --kv-cache) kv_cache_report; exit 0 ;;
 esac
 
 LLMD=$ROOT/.cache/llm-d-$LLMD_REF     # pinned llm-d checkout (guides/)
@@ -81,3 +83,4 @@ preflight
 apply_all
 wait_ready
 smoke_test
+kv_cache_report        # measured modelserver.kvCache, to copy into the profile

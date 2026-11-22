@@ -200,8 +200,8 @@ Prefill needs no sizing patch: upstream already runs it at TP=1 on 1 GPU. The CP
 # profile: profiles/gemma-4-31b-pd-tiered-g4-gke.yaml
 # Gemma 4 31B, P/D + CPU KV tier on prefill, on 3 x g4-standard-96 (2 x RTX PRO 6000 96 GB each).
 # 3 x (1 prefill + 1 decode), TP=1 everywhere; KV moves over NIXL/TCP (G4 has no RDMA NICs).
-# router.values: lruCapacityPerServer / peakPrefillThroughput in the combo are gpt-oss/H200 estimates;
-# recalibrate for Gemma on G4 (guides/recipes/router/calibration) before production.
+# modelserver.kvCache sets the router's lruCapacityPerServer (estimates below: replace with the prefill
+# startup log). peakPrefillThroughput in the combo is gpt-oss/H200: calibrate (docs/fine-tuning.md).
 model: google/gemma-4-31B-it
 strategy: pd-tiered-g4                    # -> name gemma-4-31b-it-pd-tiered-g4-vllm
 modelserver:
@@ -214,6 +214,12 @@ modelserver:
     - guides/recipes/modelserver/components/disaggregatedset-schema   # must come before the patches below
     - combos/pd-tiered-cpu                 # prefill: NIXL producer + CPU OffloadingConnector, 100 GiB
     - combos/g4-pd-sizing                  # decode TP=1, 3 slices one per node, GPU toleration
+  kvCache:                               # sizes the router's GPU + CPU prefix index (docs/fine-tuning.md)
+    # ESTIMATES until replaced with a prefill pod's startup log ("GPU KV cache size: N tokens"):
+    gpuTokens: 28597                     # ~24 GB KV / bytesPerToken; vLLM's hybrid allocator likely fits more
+    bytesPerToken: 901120                # config.json, all 60 layers, BF16: 50 sliding x 16 KV heads x 256 +
+                                         # 10 full x 4 KV heads x 512, x 2 (K,V) x 2 B (upper bound: ignores the
+                                         # 1024-token sliding window and attention_k_eq_v)
 router:
   values:
     - guides/pd-disaggregation/router/pd-disaggregation.values.yaml
@@ -334,20 +340,17 @@ Metrics then show up in Cloud Monitoring (Metrics Explorer, PromQL), e.g. `vllm:
 
 ## 6. Tune before production
 
-The router values in `combos/pd-tiered-cpu/router.values.yaml` were estimated for gpt-oss-120b on H200. For Gemma on G4, compute them from the prefill startup log instead of guessing:
+The prefix index size (`lruCapacityPerServer`) is computed at render from `modelserver.kvCache`; the values in the profile are estimates from `config.json`. Replace them with the `kvCache: {...}` line the deploy prints for the prefill pod (`./deploy.sh <profile> --kv-cache` re-reads it), which is derived from:
 
-| Value | How |
+| Profile key | How |
 | --- | --- |
-| KV bytes per token | (GPU memory vLLM gave to KV) ÷ `N`, both from the prefill log |
-| GPU blocks | `N` ÷ 64 (router block = 64 tokens) |
-| CPU blocks | 107374182400 (the 100 GiB tier) ÷ (64 × KV bytes per token) |
-| `lruCapacityPerServer` | GPU blocks + CPU blocks |
-| `peakPrefillThroughput` | measure with `guides/recipes/router/calibration` |
+| `kvCache.gpuTokens` | `N` from `GPU KV cache size: N tokens` |
+| `kvCache.bytesPerToken` | `Available KV cache memory` (bytes) ÷ `N` (TP=1) |
 
-These live in a shared combo file. Rather than editing it, copy it to `combos/pd-tiered-cpu-g4/router.values.yaml`, change the two values there, and point the profile's second `router.values` entry at the copy. Then `./test.sh` and redeploy.
+`peakPrefillThroughput` lives in the shared combo: measure it per [fine-tuning.md](fine-tuning.md), copy the combo to `combos/pd-tiered-cpu-g4/router.values.yaml` with the measured value, and point the profile's second `router.values` entry at the copy. Then `./test.sh` and redeploy.
 
 Other knobs:
-- **More KV room:** add `--quantization=fp8` to `modelserver.args` (weights ~31 GB → ~55 GB for KV), then recompute the table.
+- **More KV room:** add `--quantization=fp8` to `modelserver.args` (weights ~31 GB → ~55 GB for KV), then update `kvCache` from the new startup log.
 - **Longer context:** raise `--max-model-len` only if the log's KV size covers it.
 - **Prefill vs decode split:** fixed at 3 + 3 by the slices. For e.g. 2 prefill + 4 decode, drop `placementPolicy`, set `slices: 1` and patch each role's `replicas`. You lose the one-per-node guarantee, so check that no node gets two 140Gi prefills.
 
