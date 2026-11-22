@@ -1,0 +1,51 @@
+## Router values for profiles/gemma-4-31b-pd-tiered-g4-gke.yaml: combos/pd-tiered-cpu/router.values.yaml
+## with peakPrefillThroughput calibrated on this deployment (docs/fine-tuning.md).
+## Layer AFTER guides/pd-disaggregation/router/pd-disaggregation.values.yaml, INSTEAD OF the combo's file.
+## Same plugin graph as the P/D guide, but the prefix index is sized for GPU + CPU blocks so
+## the prefix-cache-affinity-filter counts a CPU-tier hit as "warm" when it picks a prefill pod
+## (the pattern guides/models/glm-5-2/router/glm-5.2-overrides.values.yaml uses).
+router:
+  epp:
+    pluginsCustomConfig:
+      pd-config.yaml: |
+        apiVersion: llm-d.ai/v1
+        kind: EndpointPickerConfig
+        plugins:
+        - type: always-disagg-pd-decider
+        - type: disagg-profile-handler
+          parameters:
+            deciders:
+              prefill: always-disagg-pd-decider
+        - type: prefill-filter
+        - type: decode-filter
+        # Fixed capacity: autoTune would size from GPU blocks only and forget the CPU tier.
+        # lruCapacityPerServer below is a placeholder: the pipeline recomputes it at render from the
+        # profile's modelserver.kvCache and the CPU tier (docs/fine-tuning.md).
+        - type: approx-prefix-cache-producer
+          parameters:
+            autoTune: false
+            blockSizeTokens: 64
+            lruCapacityPerServer: 35700
+            maxPrefixTokensToMatch: 131072
+        - type: inflight-load-producer
+        - type: prefix-cache-affinity-filter
+          parameters:
+            # calibrate.sh, 2026-11-21: Gemma 4 31B-it BF16, RTX PRO 6000 (g4-standard-96), TP=1,
+            # CHUNK_SIZE 8192 (= max_num_batched_tokens), against a prefill pod directly. Re-measure if
+            # any of these change. CPU-tier restores are slower than HBM hits; calibration doesn't see them.
+            peakPrefillThroughput: 5287
+        - type: token-load-scorer
+        - type: active-request-scorer
+        - type: max-score-picker
+        schedulingProfiles:
+        - name: prefill
+          plugins:
+          - pluginRef: prefill-filter
+          - pluginRef: prefix-cache-affinity-filter
+          - pluginRef: token-load-scorer
+          - pluginRef: max-score-picker
+        - name: decode
+          plugins:
+          - pluginRef: decode-filter
+          - pluginRef: active-request-scorer
+          - pluginRef: max-score-picker

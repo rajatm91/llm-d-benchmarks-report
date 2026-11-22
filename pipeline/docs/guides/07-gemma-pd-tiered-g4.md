@@ -30,7 +30,7 @@ node 3: [GPU0 prefill TP=1 + 100 GiB CPU tier] [GPU1 decode TP=1]   ← slice 3
 | Decode TP=1, 1 GPU | Upstream decode is TP=4 (4 GPUs). A G4-96 node has 2. Gemma 4 31B in BF16 (~62.5 GB) fits on one 96 GB GPU. |
 | 3 slices, `ExclusiveSlice` on `kubernetes.io/hostname` | One prefill + one decode per node. Prefill pods request 140Gi RAM (CPU tier); this keeps two of them from landing on the same node. |
 | Decode `maxSurge: 0` | All 6 GPUs are in use; upstream's `maxSurge: 1` would wait for a 7th. A slice's decode is briefly down during a rollout. |
-| `--max-model-len=32768` | ~24 GB left for KV cache after the weights. Gemma's default context would not fit. |
+| `--max-model-len=65536` | vLLM v0.34.0 measured 25.77 GiB / 183,793 tokens of KV cache per GPU after the weights: 2.8 full-length requests per pod. Gemma's default context would not fit. |
 | NIXL over TCP | No RDMA on G4. Works, but transfers across nodes are slower; the router may pair any prefill with any decode. |
 
 Per node the pods request 2 GPUs, 24 vCPU and 204Gi RAM (prefill 140Gi + decode 64Gi), well inside a `g4-standard-96`.
@@ -199,30 +199,29 @@ Prefill needs no sizing patch: upstream already runs it at TP=1 on 1 GPU. The CP
 # profile: profiles/gemma-4-31b-pd-tiered-g4-gke.yaml
 # Gemma 4 31B, P/D + CPU KV tier on prefill, on 3 x g4-standard-96 (2 x RTX PRO 6000 96 GB each).
 # 3 x (1 prefill + 1 decode), TP=1 everywhere; KV moves over NIXL/TCP (G4 has no RDMA NICs).
-# modelserver.kvCache sets the router's lruCapacityPerServer (estimates below: replace with the prefill
-# startup log). peakPrefillThroughput in the combo is gpt-oss/H200: calibrate (docs/fine-tuning.md).
+# modelserver.kvCache (measured) sets the router's lruCapacityPerServer at render; peakPrefillThroughput
+# calibrated: 5287 tok/s (combos/gemma-4-31b-g4/router.values.yaml).
 model: google/gemma-4-31B-it
 strategy: pd-tiered-g4                    # -> name gemma-4-31b-it-pd-tiered-g4-vllm
 modelserver:
   overlay: guides/pd-disaggregation/modelserver/gpu/vllm/base
   image: docker.io/vllm/vllm-openai:v0.34.0
   args:
-    - --max-model-len=32768               # ~24 GB left for KV cache after BF16 weights; check the startup log
+    - --max-model-len=65536               # KV cache holds 183,793 tokens (25.77 GiB) = 2.8 full-length requests
   components:
     - guides/recipes/modelserver/components/images/gpu-vllm/release   # base overlay ships no images
     - guides/recipes/modelserver/components/disaggregatedset-schema   # must come before the patches below
     - combos/pd-tiered-cpu                 # prefill: NIXL producer + CPU OffloadingConnector, 100 GiB
     - combos/g4-pd-sizing                  # decode TP=1, 3 slices one per node, GPU toleration
   kvCache:                               # sizes the router's GPU + CPU prefix index (docs/fine-tuning.md)
-    # ESTIMATES until replaced with a prefill pod's startup log ("GPU KV cache size: N tokens"):
-    gpuTokens: 28597                     # ~24 GB KV / bytesPerToken; vLLM's hybrid allocator likely fits more
-    bytesPerToken: 901120                # config.json, all 60 layers, BF16: 50 sliding x 16 KV heads x 256 +
-                                         # 10 full x 4 KV heads x 512, x 2 (K,V) x 2 B (upper bound: ignores the
-                                         # 1024-token sliding window and attention_k_eq_v)
+    # Measured 2026-11-22 from a prefill pod's vLLM v0.34.0 startup log (RTX PRO 6000, TP=1):
+    gpuTokens: 183793                    # "GPU KV cache size: 183,793 tokens"
+    bytesPerToken: 150551                 # "Available KV cache memory: 25.77 GiB" / 183793 (hybrid allocator;
+                                         # the all-layers config.json formula gave 901120, 6x too high)
 router:
   values:
     - guides/pd-disaggregation/router/pd-disaggregation.values.yaml
-    - combos/pd-tiered-cpu/router.values.yaml
+    - combos/gemma-4-31b-g4/router.values.yaml   # combo's values + calibrated peakPrefillThroughput (5287)
 gateway:
   provider: gke                           # renders HealthCheckPolicy + GCPBackendPolicy (else every request 503s)
   name: llm-d-gemma-gateway               # its own Gateway: another model already owns "/" on llm-d-inference-gateway
@@ -256,7 +255,7 @@ yq -N 'select(.kind=="DisaggregatedSet") | .spec.roles[] | .name + ": " +
     | select(test("tensor-parallel|max-model-len|Offloading"))] | join(" "))' $B
 ```
 
-Expected: `3`, `ExclusiveSlice` / `kubernetes.io/hostname`; both roles `--tensor-parallel-size=1 --max-model-len=32768`; only prefill mentions `OffloadingConnector`.
+Expected: `3`, `ExclusiveSlice` / `kubernetes.io/hostname`; both roles `--tensor-parallel-size=1 --max-model-len=65536`; only prefill mentions `OffloadingConnector`.
 
 To prove the test catches the main mistake, switch the overlay to `.../vllm/gke` and run `./test.sh`: it must fail with `FAIL [pd-g4]: G4 has no RDMA NICs: no DRA claims allowed`. Switch it back.
 
@@ -331,7 +330,7 @@ The prefix index size (`lruCapacityPerServer`) is computed at render from `model
 | `kvCache.gpuTokens` | `N` from `GPU KV cache size: N tokens` |
 | `kvCache.bytesPerToken` | `Available KV cache memory` (bytes) ÷ `N` (TP=1) |
 
-`peakPrefillThroughput` lives in the shared combo: measure it per [fine-tuning.md](../fine-tuning.md), copy the combo to `combos/pd-tiered-cpu-g4/router.values.yaml` with the measured value, and point the profile's second `router.values` entry at the copy. Then `./test.sh` and redeploy.
+`peakPrefillThroughput` is calibrated: **5287 tok/s** (`calibrate.sh` against a prefill pod, `CHUNK_SIZE=8192`, 2026-11-21). It lives in `combos/gemma-4-31b-g4/router.values.yaml`, a copy of the combo's values that the profile uses instead of `combos/pd-tiered-cpu/router.values.yaml`. Re-run [fine-tuning.md](../fine-tuning.md)'s runbook if the model, GPU, TP or `--max-num-batched-tokens` changes.
 
 Other knobs:
 - **More KV room:** add `--quantization=fp8` to `modelserver.args` (weights ~31 GB → ~55 GB for KV), then update `kvCache` from the new startup log.

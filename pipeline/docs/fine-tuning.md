@@ -85,7 +85,7 @@ You don't have to work these out. Every deploy ends by reading them from each mo
 
 ## Runbook: tuning a new profile
 
-Run once per new (model, accelerator, strategy), after the profile is deployed and serving. Worked example: `gemma-4-31b-pd-tiered-g4-gke` (Gemma 4 31B, 3 × g4-standard-96 with RTX PRO 6000, TP=1, CPU tier on prefill), which inherits `peakPrefillThroughput: 33821` (gpt-oss-120b on H200) from `combos/pd-tiered-cpu`; its `modelserver.kvCache` holds estimates from `config.json` until replaced with log values.
+Run once per new (model, accelerator, strategy), after the profile is deployed and serving. Worked example: `gemma-4-31b-pd-tiered-g4-gke` (Gemma 4 31B, 3 × g4-standard-96 with RTX PRO 6000, TP=1, CPU tier on prefill), which started with `peakPrefillThroughput: 33821` (gpt-oss-120b on H200) from `combos/pd-tiered-cpu` and measured **5287** (6.4× lower) on its first calibration, now in `combos/gemma-4-31b-g4/router.values.yaml`; its `modelserver.kvCache` holds estimates from `config.json` until replaced with log values.
 
 1. Find the profile's guide in the table above; that row is the list of settings to tune.
 2. Deploy with the borrowed values and confirm the smoke request passes.
