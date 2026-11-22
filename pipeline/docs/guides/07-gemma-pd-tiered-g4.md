@@ -1,18 +1,17 @@
-# Gemma 4 31B with P/D + tiered KV cache on G4 (3 × g4-standard-96)
+# 07. Gemma 4 31B with P/D + tiered KV cache on G4 (3 × g4-standard-96)
 
-This guide deploys `google/gemma-4-31B-it` with **prefill/decode disaggregation** and a **CPU KV tier on prefill** on a GKE pool of 3 × `g4-standard-96` (2 × NVIDIA RTX PRO 6000, 96 GB each, per node). It adds one profile, one kustomize component and one test to the pipeline, then follows the normal flow of [deploy-guide.md](deploy-guide.md).
+This guide deploys `google/gemma-4-31B-it` with **prefill/decode disaggregation** and a **CPU KV tier on prefill** on a GKE pool of 3 × `g4-standard-96` (2 × NVIDIA RTX PRO 6000, 96 GB each, per node). G4 has no RDMA NICs, so this is also the reference for running P/D on any non-RDMA GPU pool. The files are in the repo: `profiles/gemma-4-31b-pd-tiered-g4-gke.yaml` and `combos/g4-pd-sizing/`, checked by `test.sh` (`pd-g4`). It builds on [guide 04](04-pd-disaggregation.md).
 
 | Step | What |
 | --- | --- |
 | [0. Layout and why](#0-layout-and-why) | read once |
 | [1. Check the cluster](#1-check-the-cluster) | once per cluster |
-| [2. Add the files](#2-add-the-files) | once |
+| [2. Read the files](#2-read-the-files) | once |
 | [3. Validate offline](#3-validate-offline) | every change |
 | [4. Bundle the images](#4-bundle-the-images-connected-machine) | once, and on image changes |
 | [5. Deploy and verify](#5-deploy-and-verify) | every change |
 | [6. Tune](#6-tune-before-production) | before production |
 | [7. Troubleshooting](#7-troubleshooting) | when something breaks |
-| [8. Commit](#8-commit) | once |
 
 ---
 
@@ -36,7 +35,7 @@ node 3: [GPU0 prefill TP=1 + 100 GiB CPU tier] [GPU1 decode TP=1]   ← slice 3
 
 Per node the pods request 2 GPUs, 24 vCPU and 204Gi RAM (prefill 140Gi + decode 64Gi), well inside a `g4-standard-96`.
 
-> **Is P/D worth it here?** P/D pays off mostly on long prompts. With 6 GPUs and TCP transfers, 6 aggregated replicas with the CPU tier (deploy guide, sample D) may do better. Benchmark both before you commit to one.
+> **Is P/D worth it here?** P/D pays off mostly on long prompts. With 6 GPUs and TCP transfers, 6 aggregated replicas with the CPU tier ([guide 03](03-tiered-prefix-cache.md)) may do better. Benchmark both before you commit to one.
 
 ---
 
@@ -48,9 +47,9 @@ The render applies one `DisaggregatedSet`, one `InferencePool` and one `HTTPRout
 
 | CRD | API group | Comes from | Install |
 | --- | --- | --- | --- |
-| `leaderworkersets` | `leaderworkerset.x-k8s.io` | LWS ≥ v0.11.1 | [deploy-guide 1.4](deploy-guide.md#14-leaderworkerset-only-for-pd-and-wide-ep) (`lws/crds`) |
+| `leaderworkersets` | `leaderworkerset.x-k8s.io` | LWS ≥ v0.11.1 | [prerequisites §6](../prerequisites.md#6-leaderworkerset-pd-and-wide-ep-only) (`lws/crds`) |
 | `disaggregatedsets` | `disaggregatedset.x-k8s.io` | LWS, only with `--set enableDisaggregatedSet=true` | same step |
-| `inferencepools` | `inference.networking.k8s.io` (v1) | Gateway API Inference Extension | managed by GKE ≥ 1.34.0-gke.1626000 with Gateway API on; else `kubectl apply -f .cache/crds/inference-extension-v1.yaml` ([1.2](deploy-guide.md#12-gateway-api-and-inferencepool-crds)) |
+| `inferencepools` | `inference.networking.k8s.io` (v1) | Gateway API Inference Extension | managed by GKE ≥ 1.34.0-gke.1626000 with Gateway API on; else `kubectl apply -f .cache/crds/inference-extension-v1.yaml` ([prerequisites §4](../prerequisites.md#4-gateway-api-and-inferencepool-crd)) |
 | `gateways`, `httproutes`, `gatewayclasses` | `gateway.networking.k8s.io` (v1) | Gateway API | GKE with Gateway API enabled (`--gateway-api=standard`) |
 | `healthcheckpolicies`, `gcpbackendpolicies` | `networking.gke.io` | GKE Gateway controller | same; the router renders one of each for `provider: gke` |
 
@@ -82,7 +81,7 @@ The model weights are not an image: `fetch-model` copies `gs://models_registry/g
 
 ### 1.3 Check the cluster
 
-Do the one-time setup in [deploy-guide.md §1](deploy-guide.md#1-one-time-cluster-setup) first: InferencePool CRD (1.2), a **GKE Gateway** named `llm-d-gemma-gateway` in the deployment namespace (below; `gke-l7-rilb` needs a proxy-only subnet in the region), **LWS with `enableDisaggregatedSet=true` (1.4)**, namespace + ServiceAccount + Workload Identity (1.5). Then check:
+Do the one-time setup in [prerequisites.md](../prerequisites.md) first: InferencePool CRD (§4), a **GKE Gateway** named `llm-d-gemma-gateway` in the deployment namespace (below; `gke-l7-rilb` needs a proxy-only subnet in the region), **LWS with `enableDisaggregatedSet=true` (§6)**, namespace + ServiceAccount + Workload Identity (§7). Then check:
 
 ```bash
 kubectl config current-context                         # must be the G4 cluster, not kind
@@ -119,15 +118,15 @@ spec:
 kubectl -n <NAMESPACE> get gateway llm-d-gemma-gateway -w    # PROGRAMMED=True and an ADDRESS after a few minutes
 ```
 
-To share a Gateway that already has a catch-all route instead, set `gateway.baseModel` and install IPP ([deploy guide 1.6](deploy-guide.md#16-several-models-on-one-gateway-inference-payload-processor)). Routes on specific paths (`/optimized-baseline`) do not conflict.
+To share a Gateway that already has a catch-all route instead, set `gateway.baseModel` and install IPP ([guide 06](06-multi-model-gateway.md)). Routes on specific paths (`/optimized-baseline`) do not conflict.
 
 **ServiceAccounts.** Model-server pods run as `SERVICE_ACCOUNT`. The router chart also creates `<name>-epp` for its EPP; to reuse an existing account instead, set `ROUTER_SERVICE_ACCOUNT` in the env file (e.g. the same `SERVICE_ACCOUNT`). The chart's Roles and ClusterRole are then bound to that account.
 
 ---
 
-## 2. Add the files
+## 2. Read the files
 
-Run everything from `pipeline/`.
+Both files are in the repo; this section explains them. Run everything from `pipeline/`.
 
 ### 2.1 Sizing component
 
@@ -231,26 +230,11 @@ gateway:
   timeoutSec: 900                         # load balancer backend timeout (chart default 300s) for long generations
 ```
 
-Order of `components` matters: the image component and `disaggregatedset-schema` first, then `pd-tiered-cpu` (patches prefill args by index), then `g4-pd-sizing`. Keep `gateway.provider: gke`: it makes the router render the `HealthCheckPolicy` and `GCPBackendPolicy` the GKE load balancer needs. To use agentgateway instead, set `provider: agentgateway`, `name: llm-d-inference-gateway` and `namespace: agentgateway-system` (deploy guide 1.3).
+Order of `components` matters: the image component and `disaggregatedset-schema` first, then `pd-tiered-cpu` (patches prefill args by index), then `g4-pd-sizing`. Keep `gateway.provider: gke`: it makes the router render the `HealthCheckPolicy` and `GCPBackendPolicy` the GKE load balancer needs. To use agentgateway instead, set `provider: agentgateway`, `name: llm-d-inference-gateway` and `namespace: agentgateway-system` ([prerequisites §5](../prerequisites.md#5-a-gateway)).
 
 ### 2.3 Test
 
-In `test.sh`, right after the `pd-tiered` combo checks (the line ending `fail pd-tiered "prefill lost volumes during merge"`), add:
-
-```bash
-# G4 sizing: plain nvidia.com/gpu (no RDMA DRA claims), 1 GPU / TP=1 per role, one slice per node, offload on prefill
-B=.build/$(./deploy.sh profiles/gemma-4-31b-pd-tiered-g4-gke.yaml --name)/modelserver.yaml
-[[ -z $(yq -N 'select(.kind=="ResourceClaimTemplate") | .metadata.name' "$B") && -z $(role prefill '.resourceClaims // ""') ]] || fail pd-g4 "G4 has no RDMA NICs: no DRA claims allowed"
-for r in prefill decode; do
-  [[ $(role $r '.containers[] | select(.name=="modelserver") | .resources.limits."nvidia.com/gpu"') == 1 ]] || fail pd-g4 "$r must request 1 GPU"
-  [[ $(role $r '.containers[] | select(.name=="modelserver") | .args[]' | grep -c -- '--tensor-parallel-size=1') == 1 ]] || fail pd-g4 "$r must run TP=1"
-done
-[[ $(role prefill '.containers[] | select(.name=="modelserver") | .args[]') == *OffloadingConnector* ]] || fail pd-g4 "prefill lost the CPU tier"
-[[ $(yq -N 'select(.kind=="DisaggregatedSet") | (.spec.slices | tostring) + " " + .spec.placementPolicy.topology' "$B") == "3 kubernetes.io/hostname" ]] || fail pd-g4 "want 3 slices, one per node"
-[[ $(yq -N 'select(.kind=="HealthCheckPolicy" or .kind=="GCPBackendPolicy") | .kind' "${B%/*}/router.yaml" | sort -u | wc -l) -eq 2 ]] || fail pd-g4 "GKE Gateway needs HealthCheckPolicy + GCPBackendPolicy (provider: gke)"
-```
-
-It reuses `role()` from the line above it, which reads `$B` at call time.
+`test.sh` (the `pd-g4` checks) asserts what a cluster would otherwise reveal only at runtime: no RDMA DRA claims, 1 GPU and TP=1 on both roles, the CPU tier only on prefill, 3 slices placed one per node, and the GKE `HealthCheckPolicy` + `GCPBackendPolicy`.
 
 ---
 
@@ -294,9 +278,9 @@ Inside the air gap, install LWS from the bundle once per cluster, before the fir
 ./install-lws.sh --env-file prod
 ```
 
-GitHub and the image registries on different machines? Run `BUNDLE_STEPS=sources` on the GitHub one and `BUNDLE_STEPS=images` on the registry one, with this profile on both ([deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine)).
+GitHub and the image registries on different machines? Run `BUNDLE_STEPS=sources` on the GitHub one and `BUNDLE_STEPS=images` on the registry one, with this profile on both ([air-gapped §2](../air-gapped.md#2-bundle-on-the-connected-machine)).
 
-Mirror the new rows of `dist/images-to-mirror.tsv` (or use `IMAGE_REMOTES`), as in [deploy-guide.md §2](deploy-guide.md#2-prepare-artifacts-connected-machine). `ROUTER_CRDS=1` is not needed.
+Mirror the new rows of `dist/images-to-mirror.tsv` (or use `IMAGE_REMOTES`), as in [air-gapped §4](../air-gapped.md#4-mirror-the-images). `ROUTER_CRDS=1` is not needed.
 
 ---
 
@@ -347,7 +331,7 @@ The prefix index size (`lruCapacityPerServer`) is computed at render from `model
 | `kvCache.gpuTokens` | `N` from `GPU KV cache size: N tokens` |
 | `kvCache.bytesPerToken` | `Available KV cache memory` (bytes) ÷ `N` (TP=1) |
 
-`peakPrefillThroughput` lives in the shared combo: measure it per [fine-tuning.md](fine-tuning.md), copy the combo to `combos/pd-tiered-cpu-g4/router.values.yaml` with the measured value, and point the profile's second `router.values` entry at the copy. Then `./test.sh` and redeploy.
+`peakPrefillThroughput` lives in the shared combo: measure it per [fine-tuning.md](../fine-tuning.md), copy the combo to `combos/pd-tiered-cpu-g4/router.values.yaml` with the measured value, and point the profile's second `router.values` entry at the copy. Then `./test.sh` and redeploy.
 
 Other knobs:
 - **More KV room:** add `--quantization=fp8` to `modelserver.args` (weights ~31 GB → ~55 GB for KV), then update `kvCache` from the new startup log.
@@ -370,19 +354,6 @@ Other knobs:
 | High TTFT, decode waits on KV transfer | Cross-node NIXL over TCP. Compare with 6 aggregated replicas (see the note in [0](#0-layout-and-why)). |
 | `Gateway llm-d-gemma-gateway not found` | Create it in the deployment namespace ([1.3](#13-check-the-cluster)), or point `gateway.name` / `gateway.namespace` at an existing one. |
 | `Gateway already has catch-all "/" routes` | Another model owns `/` on that Gateway. Use this model's own Gateway, or `gateway.baseModel` + IPP. |
-| `kubectl apply`: `apiVersion not set, kind not set` | Router render from a pipeline before the fix that skips helm's empty documents; update `lib/render.sh`. |
 | Decode `Connection reset` under load | Keep-alive mismatch; keep upstream's `VLLM_HTTP_TIMEOUT_KEEP_ALIVE=120`. |
 
-The general table in [deploy-guide.md §9](deploy-guide.md#9-troubleshooting) still applies (403 on `fetch-model`, `ImagePullBackOff`, images missing from the lock, ...).
-
----
-
-## 8. Commit
-
-```bash
-git checkout -b feat/gemma-pd-tiered-g4
-git add combos/g4-pd-sizing profiles/gemma-4-31b-pd-tiered-g4-gke.yaml test.sh docs/g4-pd-tiered-gemma.md
-./test.sh
-git commit -m "feat(pipeline): Gemma 4 31B P/D + tiered KV cache on 3 x g4-standard-96"
-git push -u origin feat/gemma-pd-tiered-g4
-```
+The general tables in [operations §6](../operations.md#6-troubleshooting) still apply (403 on `fetch-model`, `ImagePullBackOff`, images missing from the lock, ...).

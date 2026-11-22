@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
-# Keep docs/deploy-guide.md honest: every YAML sample must work with the pipeline as written.
+# Keep docs/guides/*.md honest: every YAML sample must work with the pipeline as written.
 #   "# profile: <path>"  -> same content as <path> if that file exists, and renders with --dry-run
+#   "# file: <path>"     -> same content as <path> if that file exists
 #   "# models/<...>"     -> kustomize patch: renders when applied to the P/D profile
 #   anything else        -> must parse as YAML
 set -euo pipefail
 cd "$(dirname "$0")/.."
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-python3 - docs/deploy-guide.md "$T" <<'EOF'
-import re, sys
-text, out = open(sys.argv[1]).read(), sys.argv[2]
-for i, block in enumerate(re.findall(r"```yaml\n(.*?)```", text, re.S)):
-    open(f"{out}/{i:02d}.yaml", "w").write(block)
+python3 - "$T" docs/guides/*.md <<'EOF'
+import re, sys, textwrap
+out, n = sys.argv[1], 0
+for doc in sys.argv[2:]:
+    for block in re.findall(r"```yaml\n(.*?)```", open(doc).read(), re.S):
+        open(f"{out}/{n:03d}.yaml", "w").write(textwrap.dedent(block)); n += 1   # dedent: samples inside list items
 EOF
 fail() { echo "FAIL: $*" >&2; exit 1; }
 n=0
@@ -25,6 +27,10 @@ for f in "$T"/*.yaml; do
     fi
     MODEL_BUCKET=gs://guide-check ./deploy.sh "$f" --dry-run >/dev/null 2>"$T/err" || { cat "$T/err" >&2; fail "sample $path does not render"; }
     echo "ok  profile sample $path ($(./deploy.sh "$f" --name))"
+  elif [[ $head1 =~ ^#\ file:\ ([^ ]+) && -f ${BASH_REMATCH[1]} ]]; then
+    path=${BASH_REMATCH[1]}
+    [[ $(yq -o=json -I=0 'sort_keys(..)' "$f") == "$(yq -o=json -I=0 'sort_keys(..)' "$path")" ]] || fail "guide sample differs from $path"
+    echo "ok  file sample $path"
   elif [[ $head1 =~ ^#\ models/ ]]; then
     yq '.modelserver.patches = ["'"$f"'"] | .modelserver.components = ["guides/recipes/modelserver/components/disaggregatedset-schema"]' \
       profiles/pd-gke.yaml > "$T/patched-profile.yaml"
