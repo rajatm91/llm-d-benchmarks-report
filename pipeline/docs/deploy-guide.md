@@ -407,6 +407,8 @@ model: Qwen/Qwen3-32B
 strategy: tiered-cpu
 modelserver:
   overlay: guides/tiered-prefix-cache/modelserver/gpu/vllm/native/cpu/gke    # 300 GiB CPU tier per replica
+  kvCache:
+    bytesPerToken: 262144                  # Qwen3-32B KV per token: sizes the router's CPU prefix index
 router:
   values:
     - guides/tiered-prefix-cache/router/single-host/tiered-prefix-cache-cpu.values.yaml
@@ -416,7 +418,7 @@ gateway:
   namespace: gateway-infra
 ```
 
-The CPU tier lives in `/dev/shm`. The tier size, the shm `sizeLimit`, the pod memory and the router's `lruCapacityPerServer` must always change together.
+The CPU tier lives in `/dev/shm`. The tier size, the shm `sizeLimit` and the pod memory must always change together; the router's `lruCapacityPerServer` follows automatically from `cpu_bytes_to_use` and `modelserver.kvCache` ([fine-tuning.md](fine-tuning.md)).
 
 ### Sample E: prefill/decode disaggregation
 
@@ -448,6 +450,9 @@ modelserver:
   components:
     - guides/recipes/modelserver/components/disaggregatedset-schema   # must come first: patch by name, not index
     - combos/pd-tiered-cpu                 # prefill: NIXL producer + CPU OffloadingConnector, 100 GiB
+  kvCache:                                 # sizes the router's GPU+CPU prefix index (startup log values)
+    gpuTokens: 832000
+    bytesPerToken: 73728
 router:
   values:
     - guides/pd-disaggregation/router/pd-disaggregation.values.yaml
@@ -458,7 +463,7 @@ gateway:
   namespace: agentgateway-system
 ```
 
-`lruCapacityPerServer` and `peakPrefillThroughput` in the combo are estimates. Calibrate them with `guides/recipes/router/calibration` before production.
+The render computes `lruCapacityPerServer` from `modelserver.kvCache`. `peakPrefillThroughput` in the combo is a gpt-oss/H200 value: calibrate it per [fine-tuning.md](fine-tuning.md) before production.
 
 ### Sample G: wide-EP + P/D + tiered KV cache (upstream recipe)
 
@@ -468,6 +473,9 @@ model: zai-org/GLM-5.2-FP8                 # 8 nodes / 64 H200, InfiniBand
 strategy: wide-ep-pd-tiered
 modelserver:
   overlay: guides/models/glm-5-2/modelserver/gpu/vllm/deployments/default
+  kvCache:                                 # per DP rank: sizes the router's GPU+CPU prefix index
+    gpuTokens: 236800
+    bytesPerToken: 61464
 router:
   values:
     - guides/models/glm-5-2/router/glm-5-2.values.yaml
@@ -773,7 +781,7 @@ pipeline {
 
 ## Appendix: reference
 
-**Profile keys:** `model`, `strategy`, `modelAlias`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas, image}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel, timeoutSec}`, `weights.gcsUri`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
+**Profile keys:** `model`, `strategy`, `modelAlias`, `draftModel`, `speculativeConfig`, `modelserver.{overlay, components, patches, args, tensorParallel, replicas, image, kvCache.{gpuTokens, bytesPerToken}}`, `router.{values, set, mode, chartVersion}`, `gateway.{provider, name, namespace, baseModel, timeoutSec}`, `weights.gcsUri`, `llmdRef`, `waitTimeout`. See the commented schema in [`../README.md`](../README.md).
 
 **Environment** (the same for every model, set by Jenkins):
 

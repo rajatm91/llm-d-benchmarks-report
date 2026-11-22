@@ -4,6 +4,8 @@ model: Qwen/Qwen3-32B
 strategy: tiered-cpu
 modelserver:
   overlay: guides/tiered-prefix-cache/modelserver/gpu/vllm/native/cpu/gke
+  kvCache:                     # sizes the router's CPU prefix index (docs/fine-tuning.md)
+    bytesPerToken: 262144      # Qwen3-32B: 64 layers x 8 KV heads x 128 x 2 (K,V) x 2 B; 300 GiB tier -> 19200
 router:
   values:
     - guides/tiered-prefix-cache/router/single-host/tiered-prefix-cache-cpu.values.yaml

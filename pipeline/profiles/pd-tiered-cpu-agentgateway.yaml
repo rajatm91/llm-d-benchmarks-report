@@ -8,6 +8,9 @@ modelserver:
   components:
     - guides/recipes/modelserver/components/disaggregatedset-schema
     - combos/pd-tiered-cpu
+  kvCache:                     # sizes the router's GPU + CPU prefix index (docs/fine-tuning.md)
+    gpuTokens: 832000          # ESTIMATE from the combo's notes (~13,000 blocks on H200, TP=1); use the startup log
+    bytesPerToken: 73728       # gpt-oss-120b ~72 KiB/token
 router:
   values:
     - guides/pd-disaggregation/router/pd-disaggregation.values.yaml

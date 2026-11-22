@@ -2,6 +2,7 @@
 
 **New here? Follow [docs/deploy-guide.md](docs/deploy-guide.md)**: a step-by-step walkthrough from an empty cluster to a serving model, with sample YAMLs for every strategy (checked by `docs/check-guide.sh`).
 Everything a profile or environment can change, and every upstream template it can point at: [docs/configuration.md](docs/configuration.md).
+Re-tuning the router for a new model or accelerator (calibration, prefix-cache sizing): [docs/fine-tuning.md](docs/fine-tuning.md).
 
 Reusable pipeline that deploys a model with any llm-d well-lit path (or a combination of them) and registers it with an **existing** Gateway (agentgateway, GKE Gateway, Istio, …).
 
@@ -237,6 +238,7 @@ modelserver:
   replicas: 2                        # aggregated overlays only
   args: [--enable-auto-tool-choice, --tool-call-parser=qwen3_coder]   # the model's own vLLM flags
   image: docker.io/vllm/vllm-openai:v0.32.0   # replaces the overlay's vLLM image (vLLM containers only)
+  kvCache: {gpuTokens: 832000, bytesPerToken: 73728}   # sizes fixed-size router prefix indexes; a deploy prints it (docs/fine-tuning.md)
 router:
   values: [guides/optimized-baseline/router/optimized-baseline.values.yaml]   # layered in order, last wins
   set: []                            # extra helm --set

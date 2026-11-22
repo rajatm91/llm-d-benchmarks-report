@@ -204,6 +204,7 @@ render_router() {
   # (objects only: helm emits empty "---" documents for templates that render nothing; labelling those
   #  would turn them into kind-less objects that kubectl apply rejects: "apiVersion not set, kind not set")
   NAME=$NAME yq -i '(select(.kind != null) | .metadata.labels."llm-d.ai/deployment") = strenv(NAME)' "$ROUTER"
+  set_prefix_cache_capacity
   use_router_sa
   add_epp_monitoring
   # the chart hard-codes timeoutSec: 300 in its GCPBackendPolicy templates (GKE load balancer backend timeout)
@@ -211,6 +212,65 @@ render_router() {
     T=$GATEWAY_TIMEOUT yq -i '(select(.kind == "GCPBackendPolicy") | .spec.default.timeoutSec) = (strenv(T) | tonumber)' "$ROUTER"
     log "gateway timeout: GCPBackendPolicy timeoutSec=$GATEWAY_TIMEOUT"
   fi
+}
+
+# Fixed prefix indexes (approx-prefix-cache-producer with autoTune: false) get lruCapacityPerServer computed
+# for THIS model instead of the values file's number (sized for whatever model the guide was written for):
+#   lruCapacityPerServer = [gpuTokens / block]  (only when no autoTune producer indexes the GPU tier already)
+#                        + CPU tier bytes / (block x bytesPerToken)
+# block = the producer's blockSizeTokens (64); gpuTokens / bytesPerToken = modelserver.kvCache (mandatory then);
+# CPU tier bytes = cpu_bytes_to_use in the vLLM kv-transfer config (a literal or a ${VAR:-default} script form).
+set_prefix_cache_capacity() {
+  # one line per fixed producer: "<blockSizeTokens> <true if it is the only index of the GPU tier>"
+  # (map(), not [..]: yq's collect re-runs over every document after from_yaml)
+  local fixed bs
+  fixed=$(yq -N 'select(.kind == "ConfigMap") | .data[] | select(test("approx-prefix-cache-producer")) | from_yaml |
+    (.plugins | map(select(.type == "approx-prefix-cache-producer" and .parameters.autoTune != false)) | length == 0) as $gpu |
+    .plugins[] | select(.type == "approx-prefix-cache-producer" and .parameters.autoTune == false) |
+    ((.parameters.blockSizeTokens // 64) | tostring) + " " + ($gpu | tostring)' "$ROUTER")
+  [[ -n $fixed ]] || return 0
+  bs=$(cut -d' ' -f1 <<<"$fixed" | sort -u)
+  [[ $bs =~ ^[1-9][0-9]*$ ]] || die "fixed prefix indexes with different blockSizeTokens ($(echo $bs)) are not supported"
+
+  # largest CPU tier across the model-server containers (P/D: prefill has one, decode none)
+  # ponytail: one value per deployment; a per-role capacity would need one producer per role
+  local cpu=0 b v var
+  while read -r b; do
+    [[ -n $b ]] || continue
+    if [[ $b =~ ^\$\{([A-Za-z_][A-Za-z0-9_]*):-([0-9]+)\}$ ]]; then
+      var=${BASH_REMATCH[1]}
+      v=$(yq -N ".. | select(tag == \"!!map\" and has(\"env\")) | .env[] | select(.name == \"$var\") | .value" "$MS" | sort -u)
+      [[ $(wc -l <<<"$v") -le 1 ]] || die "cpu_bytes_to_use: \$$var has several values in the model-server render: $(echo $v)"
+      b=${v:-${BASH_REMATCH[2]}}
+    fi
+    [[ $b =~ ^[0-9]+$ ]] || die "cpu_bytes_to_use: cannot read a byte count from '$b'"
+    (( b > cpu )) && cpu=$b
+  done < <(grep -oE 'cpu_bytes_to_use[^0-9$]*(\$\{[A-Za-z_][A-Za-z0-9_]*:-[0-9]+\}|[0-9]+)' "$MS" |
+             grep -oE '\$\{[A-Za-z_][A-Za-z0-9_]*:-[0-9]+\}|[0-9]+$')
+
+  (( cpu > 0 )) || grep -q ' true$' <<<"$fixed" ||
+    die "the router config has a fixed-size CPU prefix index, but no cpu_bytes_to_use was found in the model-server render"
+  # unset values: keep the values file's number (first deploy of a new model); the deploy prints the measured ones
+  local k missing=()
+  for k in KV_GPU_TOKENS KV_BYTES_PER_TOKEN; do [[ -z ${!k} || ${!k} =~ ^[1-9][0-9]*$ ]] || die "modelserver.kvCache: '${!k}' is not a positive integer"; done
+  grep -q ' true$' <<<"$fixed" && [[ -z $KV_GPU_TOKENS ]] && missing+=(gpuTokens)
+  (( cpu > 0 )) && [[ -z $KV_BYTES_PER_TOKEN ]] && missing+=(bytesPerToken)
+  if (( ${#missing[@]} )); then
+    log "WARNING: modelserver.kvCache.{${missing[*]}} not set: lruCapacityPerServer stays at the router values' number, sized for the guide's model, not $MODEL. After the deploy, './deploy.sh <profile> --kv-cache' prints the values to set (docs/fine-tuning.md)"
+    return 0
+  fi
+
+  # integer math in bash (yq's % breaks above 2^31)
+  local cpu_blocks=$(( cpu / (bs * ${KV_BYTES_PER_TOKEN:-1}) )) gpu_blocks=$(( ${KV_GPU_TOKENS:-0} / bs ))
+  CPUB=$cpu_blocks ALLB=$((cpu_blocks + gpu_blocks)) yq -i '
+    (select(.kind == "ConfigMap") | .data[] | select(test("approx-prefix-cache-producer"))) |= (from_yaml |
+      (.plugins | map(select(.type == "approx-prefix-cache-producer" and .parameters.autoTune != false)) | length == 0) as $gpu |
+      (.plugins[] | select(.type == "approx-prefix-cache-producer" and .parameters.autoTune == false) | .parameters.lruCapacityPerServer) =
+        (if $gpu then strenv(ALLB) else strenv(CPUB) end | to_number) |
+      to_yaml) |
+    (select(.kind == "ConfigMap") | .data[] | select(test("approx-prefix-cache-producer"))) style="literal"' "$ROUTER"
+  log "prefix index capacity: $(yq -N 'select(.kind == "ConfigMap") | .data[] | select(test("approx-prefix-cache-producer")) | from_yaml |
+    .plugins[] | select(.type == "approx-prefix-cache-producer" and .parameters.autoTune == false) | (.name // "approx-prefix-cache-producer") + " lruCapacityPerServer=" + (.parameters.lruCapacityPerServer | tostring)' "$ROUTER" | sort -u | xargs) (GPU $gpu_blocks + CPU $cpu_blocks blocks of $bs tokens)"
 }
 
 # MONITORING=gmp: PodMonitoring for the EPP's metrics port (auth disabled above), selecting the EPP pods the same

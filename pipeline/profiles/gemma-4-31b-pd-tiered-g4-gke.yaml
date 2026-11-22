@@ -1,7 +1,7 @@
 # Gemma 4 31B, P/D + CPU KV tier on prefill, on 3 x g4-standard-96 (2 x RTX PRO 6000 96 GB each).
 # 3 x (1 prefill + 1 decode), TP=1 everywhere; KV moves over NIXL/TCP (G4 has no RDMA NICs).
-# router.values: lruCapacityPerServer / peakPrefillThroughput in the combo are gpt-oss/H200 estimates;
-# recalibrate for Gemma on G4 (guides/recipes/router/calibration) before production.
+# modelserver.kvCache sets the router's lruCapacityPerServer (estimates below: replace with the prefill
+# startup log). peakPrefillThroughput in the combo is gpt-oss/H200: calibrate (docs/fine-tuning.md).
 model: google/gemma-4-31B-it
 strategy: pd-tiered-g4                    # -> name gemma-4-31b-it-pd-tiered-g4-vllm
 modelserver:
@@ -14,6 +14,12 @@ modelserver:
     - guides/recipes/modelserver/components/disaggregatedset-schema   # must come before the patches below
     - combos/pd-tiered-cpu                 # prefill: NIXL producer + CPU OffloadingConnector, 100 GiB
     - combos/g4-pd-sizing                  # decode TP=1, 3 slices one per node, GPU toleration
+  kvCache:                               # sizes the router's GPU + CPU prefix index (docs/fine-tuning.md)
+    # ESTIMATES until replaced with a prefill pod's startup log ("GPU KV cache size: N tokens"):
+    gpuTokens: 28597                     # ~24 GB KV / bytesPerToken; vLLM's hybrid allocator likely fits more
+    bytesPerToken: 901120                # config.json, all 60 layers, BF16: 50 sliding x 16 KV heads x 256 +
+                                         # 10 full x 4 KV heads x 512, x 2 (K,V) x 2 B (upper bound: ignores the
+                                         # 1024-token sliding window and attention_k_eq_v)
 router:
   values:
     - guides/pd-disaggregation/router/pd-disaggregation.values.yaml
